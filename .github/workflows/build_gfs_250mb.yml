@@ -50,27 +50,16 @@ jobs:
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
 
-          # --- Open U/V components on isobaric levels ---
           ds_u = xr.open_dataset(
               "data/gfs.grib2",
               engine="cfgrib",
-              backend_kwargs={
-                  "filter_by_keys": {
-                      "typeOfLevel": "isobaricInhPa",
-                      "shortName": "u"
-                  }
-              },
+              backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "u"}},
           )
 
           ds_v = xr.open_dataset(
               "data/gfs.grib2",
               engine="cfgrib",
-              backend_kwargs={
-                  "filter_by_keys": {
-                      "typeOfLevel": "isobaricInhPa",
-                      "shortName": "v"
-                  }
-              },
+              backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "v"}},
           )
 
           u = ds_u["u"].sel(isobaricInhPa=250)
@@ -80,14 +69,15 @@ jobs:
           speed_ms = np.sqrt(u**2 + v**2)
           speed_kt = speed_ms * 1.94384
 
-          # --- Clip to Web Mercator latitude range ---
-          webmerc_max = 85.0511
-          lats = speed_kt.latitude.values
+          # --- Clip to Web Mercator latitude range (hard drop) ---
+          webmerc_max = 85.05112878
+          speed_clip = speed_kt.where(
+              (speed_kt.latitude <= webmerc_max) & (speed_kt.latitude >= -webmerc_max),
+              drop=True
+          )
 
-          if lats[0] > lats[-1]:
-              speed_clip = speed_kt.sel(latitude=slice(webmerc_max, -webmerc_max))
-          else:
-              speed_clip = speed_kt.sel(latitude=slice(-webmerc_max, webmerc_max))
+          # Force north->south (north-up raster)
+          speed_clip = speed_clip.sortby("latitude", ascending=False)
 
           # Wrap longitudes 0–360 -> -180–180 for web maps and sort
           speed_clip = speed_clip.assign_coords(
@@ -108,22 +98,19 @@ jobs:
           )
 
           # --- Color ramp (knots) ---
-          # You can tweak these thresholds
-          vmin = 20.0   # lower bound (kt)
-          vmax = 160.0  # upper bound (kt)
+          vmin = 20.0
+          vmax = 160.0
 
           data = np.clip(speed_clip.values, vmin, vmax)
           norm = (data - vmin) / (vmax - vmin)
           norm = np.clip(norm, 0.0, 1.0)
 
-          cmap = plt.get_cmap("turbo")  # nice blue→red ramp
-          rgba = cmap(norm)             # (ny, nx, 4) in 0–1
-
-          rgb = (rgba[..., :3] * 255).astype("uint8")  # drop alpha
+          cmap = plt.get_cmap("turbo")
+          rgba = cmap(norm)
+          rgb = (rgba[..., :3] * 255).astype("uint8")
 
           height, width, _ = rgb.shape
 
-          # --- Write 3-band uint8 GeoTIFF with EPSG:4326 ---
           with rasterio.open(
               "output_250mb_color.tif",
               "w",
@@ -146,11 +133,11 @@ jobs:
         run: |
           gdalinfo output_250mb_color.tif | egrep "Size is|Upper Left|Lower Right"
 
-      - name: Generate map tiles (zoom 0-4)
+      - name: Generate map tiles (zoom 0-4) - WebMercator XYZ
         run: |
           rm -rf tiles/250mb/latest
           mkdir -p tiles/250mb/latest
-          gdal2tiles.py -z 0-4 output_250mb_color.tif tiles/250mb/latest
+          gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 output_250mb_color.tif tiles/250mb/latest
 
       - name: Commit updated tiles
         env:
