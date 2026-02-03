@@ -3,8 +3,8 @@
       <Title>temp_250mb.vrt</Title>
       <Abstract></Abstract>
       <SRS>EPSG:3857</SRS>
-      <BoundingBox minx="0.00000000000000" miny="-85.05112878000000" maxx="180.00000000000000" maxy="85.00000000000000"/>
-      <Origin x="0.00000000000000" y="-85.05112878000000"/>
+      <BoundingBox minx="-180.00000000000000" miny="-85.03532696002335" maxx="180.00000000000000" maxy="85.00000000000000"/>
+      <Origin x="-180.00000000000000" y="-85.03532696002335"/>
       <TileFormat width="256" height="256" mime-type="image/png" extension="png"/>
       <TileSets profile="mercator">
         <TileSet href="0" units-per-pixel="156543.03390000000945" order="0"/>
