@@ -53,7 +53,7 @@
         var white = L.tileLayer("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEAAQMAAABmvDolAAAAA1BMVEX///+nxBvIAAAAH0lEQVQYGe3BAQ0AAADCIPunfg43YAAAAAAAAAAA5wIhAAAB9aK9BAAAAABJRU5ErkJggg==", {minZoom: 0, maxZoom: 4});
 
         // Overlay layers (TMS)
-        var lyr = L.tileLayer('./{z}/{x}/{y}.png', {tms: 1, opacity: 0.7, attribution: "", minZoom: 0, maxZoom: 4});
+        var lyr = L.tileLayer('./{z}/{x}/{y}.png', {tms: 0, opacity: 0.7, attribution: "", minZoom: 0, maxZoom: 4});
 
         // Map
         var map = L.map('map', {
