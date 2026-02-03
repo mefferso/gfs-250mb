@@ -1,13 +1,17 @@
 name: Build GFS 250mb Wind Tiles
 
-# ✅ Required so the workflow can commit/push tiles back into the repo
 permissions:
   contents: write
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # every 6 hours (UTC)
+    - cron: "0 */6 * * *"   # every 6 hours (UTC)
   workflow_dispatch:
+  # Uncomment if you want it to run when YOU commit changes
+  # push:
+  #   branches: [main]
+  #   paths-ignore:
+  #     - "tiles/**"
 
 jobs:
   build:
@@ -23,7 +27,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -48,49 +52,34 @@ jobs:
           import rasterio
           from rasterio.transform import from_origin
 
-          # Open U component on isobaric levels
           ds_u = xr.open_dataset(
               "data/gfs.grib2",
               engine="cfgrib",
-              backend_kwargs={
-                  "filter_by_keys": {
-                      "typeOfLevel": "isobaricInhPa",
-                      "shortName": "u"
-                  }
-              },
+              backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "u"}},
           )
-
-          # Open V component on isobaric levels
           ds_v = xr.open_dataset(
               "data/gfs.grib2",
               engine="cfgrib",
-              backend_kwargs={
-                  "filter_by_keys": {
-                      "typeOfLevel": "isobaricInhPa",
-                      "shortName": "v"
-                  }
-              },
+              backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "v"}},
           )
 
-          # Select 250 mb level
           u = ds_u["u"].sel(isobaricInhPa=250)
           v = ds_v["v"].sel(isobaricInhPa=250)
 
-          # Wind speed in m/s, then knots
           speed_ms = np.sqrt(u**2 + v**2)
           speed_kt = speed_ms * 1.94384
 
-          # Clip latitude to Web Mercator valid range
-          webmerc_max = 85.0511
+          # IMPORTANT: use 85.0 so it lands on the 0.25° grid (avoids -85.25 surprises)
+          webmerc_max = 85.0
           lats = speed_kt.latitude.values
 
-          # Handle both descending (90->-90) and ascending lat axes
+          # Handle descending (north->south) vs ascending
           if lats[0] > lats[-1]:
               speed_clip = speed_kt.sel(latitude=slice(webmerc_max, -webmerc_max))
           else:
               speed_clip = speed_kt.sel(latitude=slice(-webmerc_max, webmerc_max))
 
-          # Wrap longitudes from 0..360 to -180..180 for web maps (Leaflet/Web Mercator)
+          # Wrap 0..360 -> -180..180 and sort for web maps
           speed_clip = speed_clip.assign_coords(
               longitude=(((speed_clip.longitude + 180) % 360) - 180)
           ).sortby("longitude")
@@ -108,7 +97,6 @@ jobs:
               dy
           )
 
-          # Write GeoTIFF as float32
           with rasterio.open(
               "output_250mb.tif",
               "w",
@@ -127,11 +115,12 @@ jobs:
 
       - name: Debug GeoTIFF bounds
         run: |
-          gdalinfo output_250mb.tif | egrep "Size is|Upper Left|Lower Right"
+          gdalinfo output_250mb.tif | egrep "Size is|Upper Left|Lower Right|Pixel Size"
 
-      - name: Convert GeoTIFF to 8-bit
+      - name: Convert GeoTIFF to 8-bit (force useful range)
         run: |
-          gdal_translate -of VRT -ot Byte -scale output_250mb.tif temp_250mb.vrt
+          # Force 0..200 kt -> 0..255 (tweak if you want different contrast)
+          gdal_translate -of VRT -ot Byte -scale 0 200 0 255 output_250mb.tif temp_250mb.vrt
 
       - name: Generate map tiles (zoom 0-4)
         run: |
@@ -149,6 +138,5 @@ jobs:
           git add tiles/250mb/latest || true
           git commit -m "Update GFS 250mb tiles" || echo "No changes to commit"
 
-          # Make sure push uses the workflow token
           git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}
           git push
