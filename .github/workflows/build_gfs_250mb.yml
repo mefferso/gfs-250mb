@@ -1,5 +1,9 @@
 name: Build GFS 250mb Wind Tiles
 
+# ✅ Required so the workflow can commit/push tiles back into the repo
+permissions:
+  contents: write
+
 on:
   schedule:
     - cron: '0 */6 * * *'   # every 6 hours (UTC)
@@ -12,6 +16,9 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -79,10 +86,8 @@ jobs:
 
           # Handle both descending (90->-90) and ascending lat axes
           if lats[0] > lats[-1]:
-              # descending
               speed_clip = speed_kt.sel(latitude=slice(webmerc_max, -webmerc_max))
           else:
-              # ascending
               speed_clip = speed_kt.sel(latitude=slice(-webmerc_max, webmerc_max))
 
           lats_clip = speed_clip.latitude.values
@@ -117,7 +122,6 @@ jobs:
 
       - name: Convert GeoTIFF to 8-bit
         run: |
-          # Create an 8-bit VRT with auto scaling
           gdal_translate -of VRT -ot Byte -scale output_250mb.tif temp_250mb.vrt
 
       - name: Generate map tiles (zoom 0-4)
@@ -127,10 +131,15 @@ jobs:
           gdal2tiles.py -z 0-4 temp_250mb.vrt tiles/250mb/latest
 
       - name: Commit updated tiles
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add tiles/250mb/latest || true
           git commit -m "Update GFS 250mb tiles" || echo "No changes to commit"
-          git push
 
+          # Make sure push uses the workflow token
+          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}
+          git push
