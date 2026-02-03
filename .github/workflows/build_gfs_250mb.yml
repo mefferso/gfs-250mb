@@ -73,16 +73,27 @@ jobs:
           speed_ms = np.sqrt(u**2 + v**2)
           speed_kt = speed_ms * 1.94384
 
-          # Lat/lon and grid spacing
+          # Clip latitude to Web Mercator valid range
+          webmerc_max = 85.0511
           lats = speed_kt.latitude.values
-          lons = speed_kt.longitude.values
 
-          dy = float(abs(lats[1] - lats[0]))
-          dx = float(abs(lons[1] - lons[0]))
+          # Handle both descending (90->-90) and ascending lat axes
+          if lats[0] > lats[-1]:
+              # descending
+              speed_clip = speed_kt.sel(latitude=slice(webmerc_max, -webmerc_max))
+          else:
+              # ascending
+              speed_clip = speed_kt.sel(latitude=slice(-webmerc_max, webmerc_max))
+
+          lats_clip = speed_clip.latitude.values
+          lons_clip = speed_clip.longitude.values
+
+          dy = float(abs(lats_clip[1] - lats_clip[0]))
+          dx = float(abs(lons_clip[1] - lons_clip[0]))
 
           transform = from_origin(
-              float(lons.min()),
-              float(lats.max()),
+              float(lons_clip.min()),
+              float(lats_clip.max()),
               dx,
               dy
           )
@@ -92,14 +103,14 @@ jobs:
               "output_250mb.tif",
               "w",
               driver="GTiff",
-              height=speed_kt.shape[0],
-              width=speed_kt.shape[1],
+              height=speed_clip.shape[0],
+              width=speed_clip.shape[1],
               count=1,
               dtype="float32",
               crs="EPSG:4326",
               transform=transform,
           ) as dst:
-              dst.write(speed_kt.values.astype("float32"), 1)
+              dst.write(speed_clip.values.astype("float32"), 1)
 
           print("250mb wind speed GeoTIFF written successfully")
           EOF
