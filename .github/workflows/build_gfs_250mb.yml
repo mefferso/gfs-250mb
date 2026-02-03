@@ -90,6 +90,11 @@ jobs:
           else:
               speed_clip = speed_kt.sel(latitude=slice(-webmerc_max, webmerc_max))
 
+          # Wrap longitudes from 0..360 to -180..180 for web maps (Leaflet/Web Mercator)
+          speed_clip = speed_clip.assign_coords(
+              longitude=(((speed_clip.longitude + 180) % 360) - 180)
+          ).sortby("longitude")
+
           lats_clip = speed_clip.latitude.values
           lons_clip = speed_clip.longitude.values
 
