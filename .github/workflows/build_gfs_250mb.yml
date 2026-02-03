@@ -39,7 +39,15 @@ jobs:
         import rasterio
         from rasterio.transform import from_origin
 
-        ds = xr.open_dataset("data/gfs.grib2", engine="cfgrib")
+        ds = xr.open_dataset(
+            "data/gfs.grib2",
+            engine="cfgrib",
+            backend_kwargs={
+                "filter_by_keys": {
+                    "typeOfLevel": "isobaricInhPa"
+                }
+            }
+        )
 
         u = ds["u_component_of_wind_isobaric"].sel(isobaricInhPa=250)
         v = ds["v_component_of_wind_isobaric"].sel(isobaricInhPa=250)
@@ -69,7 +77,6 @@ jobs:
         ) as dst:
             dst.write(speed_kt.values.astype("float32"), 1)
         EOF
-
     - name: Generate map tiles (zoom 0–4)
       run: |
         rm -rf tiles/250mb/latest
