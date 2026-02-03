@@ -10,83 +10,110 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gdal-bin
-        pip install numpy xarray cfgrib eccodes rasterio matplotlib
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin
+          pip install numpy xarray cfgrib eccodes rasterio
 
-    - name: Download latest GFS 0.25° (f000)
-      run: |
-        mkdir -p data
-        curl -L \
-          "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.$(date -u +%Y%m%d)/00/atmos/gfs.t00z.pgrb2.0p25.f000" \
-          -o data/gfs.grib2
+      - name: Download latest GFS 0.25° (00z f000)
+        run: |
+          mkdir -p data
+          ymd=$(date -u +%Y%m%d)
+          base="https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod"
+          url="$base/gfs.$ymd/00/atmos/gfs.t00z.pgrb2.0p25.f000"
+          echo "Downloading $url"
+          curl -fSL "$url" -o data/gfs.grib2
 
-    - name: Generate 250mb wind speed GeoTIFF
-      run: |
-        python << 'EOF'
-        import xarray as xr
-        import numpy as np
-        import rasterio
-        from rasterio.transform import from_origin
+      - name: Generate 250mb wind speed GeoTIFF
+        run: |
+          python << 'EOF'
+          import xarray as xr
+          import numpy as np
+          import rasterio
+          from rasterio.transform import from_origin
 
-        ds = xr.open_dataset(
-            "data/gfs.grib2",
-            engine="cfgrib",
-            backend_kwargs={
-                "filter_by_keys": {
-                    "typeOfLevel": "isobaricInhPa"
-                }
-            }
-        )
+          # Open U component on isobaric levels
+          ds_u = xr.open_dataset(
+              "data/gfs.grib2",
+              engine="cfgrib",
+              backend_kwargs={
+                  "filter_by_keys": {
+                      "typeOfLevel": "isobaricInhPa",
+                      "shortName": "u"
+                  }
+              },
+          )
 
-        u = ds["u_component_of_wind_isobaric"].sel(isobaricInhPa=250)
-        v = ds["v_component_of_wind_isobaric"].sel(isobaricInhPa=250)
+          # Open V component on isobaric levels
+          ds_v = xr.open_dataset(
+              "data/gfs.grib2",
+              engine="cfgrib",
+              backend_kwargs={
+                  "filter_by_keys": {
+                      "typeOfLevel": "isobaricInhPa",
+                      "shortName": "v"
+                  }
+              },
+          )
 
-        speed_ms = np.sqrt(u**2 + v**2)
-        speed_kt = speed_ms * 1.94384
+          # Select 250 mb level
+          u = ds_u["u"].sel(isobaricInhPa=250)
+          v = ds_v["v"].sel(isobaricInhPa=250)
 
-        lats = speed_kt.latitude.values
-        lons = speed_kt.longitude.values
+          # Wind speed in m/s, then knots
+          speed_ms = np.sqrt(u**2 + v**2)
+          speed_kt = speed_ms * 1.94384
 
-        transform = from_origin(
-            lons.min(), lats.max(),
-            abs(lons[1] - lons[0]),
-            abs(lats[1] - lats[0])
-        )
+          # Lat/lon and grid spacing
+          lats = speed_kt.latitude.values
+          lons = speed_kt.longitude.values
 
-        with rasterio.open(
-            "output_250mb.tif",
-            "w",
-            driver="GTiff",
-            height=speed_kt.shape[0],
-            width=speed_kt.shape[1],
-            count=1,
-            dtype="float32",
-            crs="EPSG:4326",
-            transform=transform,
-        ) as dst:
-            dst.write(speed_kt.values.astype("float32"), 1)
-        EOF
-    - name: Generate map tiles (zoom 0–4)
-      run: |
-        rm -rf tiles/250mb/latest
-        mkdir -p tiles/250mb/latest
-        gdal2tiles.py -z 0-4 output_250mb.tif tiles/250mb/latest
+          dy = float(abs(lats[1] - lats[0]))
+          dx = float(abs(lons[1] - lons[0]))
 
-    - name: Commit updated tiles
-      run: |
-        git config user.name "github-actions"
-        git config user.email "github-actions@github.com"
-        git add tiles
-        git commit -m "Update GFS 250mb tiles" || echo "No changes"
-        git push
+          transform = from_origin(
+              float(lons.min()),
+              float(lats.max()),
+              dx,
+              dy
+          )
+
+          # Write GeoTIFF
+          with rasterio.open(
+              "output_250mb.tif",
+              "w",
+              driver="GTiff",
+              height=speed_kt.shape[0],
+              width=speed_kt.shape[1],
+              count=1,
+              dtype="float32",
+              crs="EPSG:4326",
+              transform=transform,
+          ) as dst:
+              dst.write(speed_kt.values.astype("float32"), 1)
+
+          print("250mb wind speed GeoTIFF written successfully")
+          EOF
+
+      - name: Generate map tiles (zoom 0-4)
+        run: |
+          rm -rf tiles/250mb/latest
+          mkdir -p tiles/250mb/latest
+          gdal2tiles.py -z 0-4 output_250mb.tif tiles/250mb/latest
+
+      - name: Commit updated tiles
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add tiles/250mb/latest || true
+          git commit -m "Update GFS 250mb tiles" || echo "No changes to commit"
+          git push
