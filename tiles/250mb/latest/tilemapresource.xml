@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
     <TileMap version="1.0.0" tilemapservice="http://tms.osgeo.org/1.0.0">
-      <Title>temp_250mb.vrt</Title>
+      <Title>output_250mb_color.tif</Title>
       <Abstract></Abstract>
       <SRS>EPSG:3857</SRS>
       <BoundingBox minx="-180.00000000000000" miny="-85.03532696002335" maxx="180.00000000000000" maxy="85.00000000000000"/>
