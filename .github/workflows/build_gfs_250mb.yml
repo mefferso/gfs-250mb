@@ -125,6 +125,10 @@ jobs:
           print("250mb wind speed GeoTIFF written successfully")
           EOF
 
+      - name: Debug GeoTIFF bounds
+        run: |
+          gdalinfo output_250mb.tif | egrep "Size is|Upper Left|Lower Right"
+
       - name: Convert GeoTIFF to 8-bit
         run: |
           gdal_translate -of VRT -ot Byte -scale output_250mb.tif temp_250mb.vrt
