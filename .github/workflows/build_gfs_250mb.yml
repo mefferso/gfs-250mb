@@ -87,7 +87,7 @@ jobs:
               dy
           )
 
-          # Write GeoTIFF
+          # Write GeoTIFF as float32
           with rasterio.open(
               "output_250mb.tif",
               "w",
@@ -104,11 +104,16 @@ jobs:
           print("250mb wind speed GeoTIFF written successfully")
           EOF
 
+      - name: Convert GeoTIFF to 8-bit
+        run: |
+          # Create an 8-bit VRT with auto scaling
+          gdal_translate -of VRT -ot Byte -scale output_250mb.tif temp_250mb.vrt
+
       - name: Generate map tiles (zoom 0-4)
         run: |
           rm -rf tiles/250mb/latest
           mkdir -p tiles/250mb/latest
-          gdal2tiles.py -z 0-4 output_250mb.tif tiles/250mb/latest
+          gdal2tiles.py -z 0-4 temp_250mb.vrt tiles/250mb/latest
 
       - name: Commit updated tiles
         run: |
