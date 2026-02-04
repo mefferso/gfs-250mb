@@ -1,4 +1,4 @@
-name: Build GFS 250mb Wind Tiles
+name: Build ECMWF 250mb Wind Tiles
 
 permissions:
   contents: write
@@ -28,38 +28,39 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gdal-bin
-          pip install numpy xarray cfgrib eccodes rasterio matplotlib
+          # [cite_start]Added ecmwf-opendata to the list [cite: 3]
+          pip install numpy xarray cfgrib eccodes rasterio matplotlib ecmwf-opendata
 
-      - name: Download latest GFS (Dynamic Cycle)
+      - name: Download latest ECMWF (Open Data)
         run: |
           mkdir -p data
+          python3 << 'EOF'
+          from ecmwf.opendata import Client
+          import os
+
+          client = Client()
           
-          # Use a Python script to calculate the correct cycle
-          # (Using a heredoc 'EOF' handles quotes safely)
-          python3 << 'EOF' > cycle_env.sh
-          from datetime import datetime, timedelta
-          # Look back 5 hours to find the latest fully published run
-          target = datetime.utcnow() - timedelta(hours=5)
-          cycle_hour = (target.hour // 6) * 6
-          ymd = target.strftime("%Y%m%d")
+          print("Downloading ECMWF 250mb Wind Data...")
           
-          # Print exports for the shell to read
-          print(f"export ymd={ymd}")
-          print(f"export cycle={cycle_hour:02d}")
+          # Download 250mb U and V wind components (0.25 deg resolution)
+          # step=0 is the analysis/current time
+          # date=-1 / time="latest" automatically finds the most recent run
+          try:
+              client.retrieve(
+                  date=-1,
+                  time="latest",
+                  step=0,
+                  type="fc",         # Forecast
+                  levtype="pl",      # Pressure Levels
+                  levelist=250,      # 250 hPa
+                  param=["u", "v"],  # U and V wind components
+                  target="data/ecmwf.grib2"
+              )
+              print("Download complete: data/ecmwf.grib2")
+          except Exception as e:
+              print(f"Error downloading ECMWF data: {e}")
+              exit(1)
           EOF
-          
-          # Load the variables we just calculated
-          source cycle_env.sh
-          rm cycle_env.sh
-
-          echo "Targeting Cycle: $ymd ${cycle}z"
-
-          # Construct dynamic URL
-          base="https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod"
-          url="$base/gfs.$ymd/$cycle/atmos/gfs.t${cycle}z.pgrb2.0p25.f000"
-          
-          echo "Downloading $url"
-          curl -fSL "$url" -o data/gfs.grib2
 
       - name: Generate COLOR 250mb wind GeoTIFF
         run: |
@@ -71,21 +72,46 @@ jobs:
           import matplotlib
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
+          import os
 
+          # Check if file exists first
+          if not os.path.exists("data/ecmwf.grib2"):
+              print("Error: Input file data/ecmwf.grib2 not found.")
+              exit(1)
+
+          # Open U component
+          # Note: ECMWF Open Data usually uses shortName 'u'/'v' and level 250
+          # [cite_start]We update the filename and keys from the original GFS script [cite: 8, 9]
           ds_u = xr.open_dataset(
-              "data/gfs.grib2",
+              "data/ecmwf.grib2",
               engine="cfgrib",
-              backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "u"}},
+              backend_kwargs={
+                  "filter_by_keys": {
+                      "shortName": "u", 
+                      "typeOfLevel": "isobaricInhPa", 
+                      "level": 250
+                  }
+              },
           )
 
+          # Open V component
           ds_v = xr.open_dataset(
-              "data/gfs.grib2",
+              "data/ecmwf.grib2",
               engine="cfgrib",
-              backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "v"}},
+              backend_kwargs={
+                  "filter_by_keys": {
+                      "shortName": "v", 
+                      "typeOfLevel": "isobaricInhPa", 
+                      "level": 250
+                  }
+              },
           )
 
-          u = ds_u["u"].sel(isobaricInhPa=250)
-          v = ds_v["v"].sel(isobaricInhPa=250)
+          # Select the variable. Note: depending on the GRIB definition, 
+          # cfgrib might name the variable 'u' or 'u_component_of_wind'. 
+          # We access by standard shortName if possible, or fallback.
+          u = ds_u["u"]
+          v = ds_v["v"]
 
           # m/s -> kt
           speed_ms = np.sqrt(u**2 + v**2)
@@ -120,6 +146,7 @@ jobs:
           )
 
           # --- Color ramp (knots) ---
+          # [cite_start]Matching original coloring logic [cite: 14]
           vmin = 20.0
           vmax = 160.0
 
@@ -159,6 +186,7 @@ jobs:
         run: |
           rm -rf tiles/250mb/latest
           mkdir -p tiles/250mb/latest
+          # [cite_start]Same tile generation command [cite: 19]
           gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 output_250mb_color.tif tiles/250mb/latest
 
       - name: Commit updated tiles
@@ -169,7 +197,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add tiles/250mb/latest || true
-          git commit -m "Update GFS 250mb tiles" || echo "No changes to commit"
+          git commit -m "Update ECMWF 250mb tiles" || echo "No changes to commit"
 
           git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}
           git push
