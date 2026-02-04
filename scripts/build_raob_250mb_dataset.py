@@ -1,15 +1,11 @@
+# scripts/build_raob_250mb_dataset.py
 #!/usr/bin/env python3
 """
 scripts/build_raob_250mb_dataset.py
 
 - Reads RAOB obs (CSV/JSON) for all stations.
 - Samples 250mb SPEED GeoTIFFs for GFS / ECMWF / CMC / ICON.
-- Writes data/raob/latest.json in the format your map expects.
-
-Assumptions:
-- Obs are in knots.
-- SPEED GeoTIFFs are single-band float (not color RGB).
-- VALID_UTC is passed via environment (YYYYMMDDHH) from the workflow.
+- Writes data/raob/latest.json in the format the web map expects.
 """
 
 from __future__ import annotations
@@ -27,7 +23,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 MS_TO_KT = 1.9438444924406
 
-# backends
 _USE_RASTERIO = False
 _USE_GDAL = False
 
@@ -244,7 +239,6 @@ def open_raster(path: Path, units: str) -> RasterInfo:
 
 
 def _adjust_lon(lon: float, info: RasterInfo) -> float:
-    # handle 0..360 vs -180..180 grids
     if info.lon_min >= 0 and lon < 0:
         lon = lon % 360.0
     if info.lon_max <= 180 and lon > 180:
@@ -426,7 +420,6 @@ def main() -> int:
     if v_arg:
         valid_utc = v_arg
     elif v_env and len(v_env) == 10:
-        # YYYYMMDDHH -> YYYY-MM-DDTHHZ
         valid_utc = f"{v_env[0:4]}-{v_env[4:6]}-{v_env[6:8]}T{v_env[8:10]}:00Z"
     elif valid_guess:
         valid_utc = valid_guess
@@ -435,7 +428,6 @@ def main() -> int:
     else:
         valid_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00Z")
 
-    # rasters
     def resolve(explicit: str, pats: List[str]) -> Optional[Path]:
         return _resolve_candidate(explicit or None, pats)
 
