@@ -97,6 +97,11 @@ jobs:
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
 
+
+          - name: Build RAOB 250mb dataset
+            run: |
+              python build_raob_250mb_dataset.py
+          
           # Web Mercator is only valid to about ±85.0511°
           WEBMERC_MAXLAT = 85.0511
 
