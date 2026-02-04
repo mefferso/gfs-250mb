@@ -41,7 +41,7 @@ jobs:
           client = Client()
           
           # Look back ~4 hours to ensure the run is published 
-          target = datetime.utcnow() - timedelta(hours=4)
+          target = datetime.utcnow() - timedelta(hours=6)
           
           # Round down to nearest 6-hour cycle (0, 6, 12, 18)
           cycle_hour = (target.hour // 6) * 6
