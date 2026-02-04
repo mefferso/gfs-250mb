@@ -43,7 +43,6 @@ jobs:
             local url="https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.${ymd}/${cyc}/atmos/gfs.t${cyc}z.pgrb2.0p25.f000"
             echo "Trying ${ymd} ${cyc}Z -> ${url}"
 
-            # curl fails non-200 with -f; verify file is not tiny HTML
             if curl -fsSL --max-time 120 -o data/gfs.grib2 "${url}"; then
               local sz
               sz=$(stat -c%s data/gfs.grib2 || echo 0)
@@ -64,7 +63,6 @@ jobs:
           TODAY=$(date -u +"%Y%m%d")
           YDAY=$(date -u -d "yesterday" +"%Y%m%d")
 
-          # candidate order prefers most likely-available recent 00/12 cycles
           if [ "${NOW_H}" -ge 18 ]; then
             CANDIDATES="${TODAY}:12 ${TODAY}:00 ${YDAY}:12 ${YDAY}:00"
           elif [ "${NOW_H}" -ge 6 ]; then
@@ -88,7 +86,7 @@ jobs:
 
           echo "Using VALID_UTC=${VALID_UTC}"
 
-      - name: Generate COLOR 250mb wind GeoTIFF (vmax=225)
+      - name: Generate COLOR 250mb wind GeoTIFF (vmax=225, clipped to WebMercator lat range)
         run: |
           python << 'EOF'
           import xarray as xr
@@ -99,7 +97,10 @@ jobs:
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
 
-          # Force isobaricInhPa to avoid cfgrib DatasetBuildError (multiple typeOfLevel)
+          # Web Mercator is only valid to about ±85.0511°
+          WEBMERC_MAXLAT = 85.0511
+
+          # Force isobaricInhPa so cfgrib doesn't choke on multiple u/v fields
           ds_u = xr.open_dataset(
               "data/gfs.grib2",
               engine="cfgrib",
@@ -127,8 +128,12 @@ jobs:
               longitude=(((speed.longitude + 180) % 360) - 180)
           ).sortby("longitude").sortby("latitude", ascending=False)
 
+          # CLIP to avoid invalid latitude in web mercator reprojection
+          speed = speed.sel(latitude=slice(WEBMERC_MAXLAT, -WEBMERC_MAXLAT))
+
           lats = speed.latitude.values
           lons = speed.longitude.values
+
           dx = float(abs(lons[1] - lons[0]))
           dy = float(abs(lats[1] - lats[0]))
           transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
