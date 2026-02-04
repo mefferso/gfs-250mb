@@ -1,3 +1,4 @@
+# .github/workflows/build_gfs_250mb.yml
 name: Build GFS 250mb Wind Tiles
 
 on:
@@ -51,7 +52,7 @@ jobs:
                 echo "VALID_UTC=${ymd}${cyc}" >> $GITHUB_ENV
                 return 0
               else
-                echo "Downloaded file too small (${sz} bytes) - treating as failure"
+                echo "Downloaded file too small (${sz}) - treating as failure"
               fi
             fi
 
@@ -97,11 +98,6 @@ jobs:
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
 
-
-          - name: Build RAOB 250mb dataset
-            run: |
-              python build_raob_250mb_dataset.py
-          
           # Web Mercator is only valid to about ±85.0511°
           WEBMERC_MAXLAT = 85.0511
 
@@ -126,7 +122,8 @@ jobs:
           u = ds_u["u"].sel(isobaricInhPa=250)
           v = ds_v["v"].sel(isobaricInhPa=250)
 
-          speed = np.sqrt(u**2 + v**2) * 1.94384  # kt
+          # Wind speed in kt
+          speed = np.sqrt(u**2 + v**2) * 1.94384
 
           # shift lon to -180..180 and sort
           speed = speed.assign_coords(
@@ -143,6 +140,22 @@ jobs:
           dy = float(abs(lats[1] - lats[0]))
           transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
 
+          # --- WRITE RAW SPEED GeoTIFF (for RAOB sampling) ---
+          with rasterio.open(
+              "output_250mb_speed.tif",
+              "w",
+              driver="GTiff",
+              height=speed.shape[0],
+              width=speed.shape[1],
+              count=1,
+              dtype="float32",
+              crs="EPSG:4326",
+              transform=transform,
+              nodata=np.nan,
+          ) as dst:
+              dst.write(speed.values.astype("float32"), 1)
+
+          # --- MAKE COLORIZED GeoTIFF FOR TILES ---
           vmin, vmax = 20.0, 225.0
           data = np.clip(speed.values, vmin, vmax)
           norm = (data - vmin) / (vmax - vmin)
@@ -165,7 +178,7 @@ jobs:
               dst.write(rgb[:, :, 1], 2)
               dst.write(rgb[:, :, 2], 3)
 
-          print("GeoTIFF written successfully")
+          print("GeoTIFFs written successfully (speed + color)")
           EOF
 
       - name: Generate map tiles (zoom 0-4)
