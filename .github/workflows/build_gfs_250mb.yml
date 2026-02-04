@@ -34,15 +34,23 @@ jobs:
         run: |
           mkdir -p data
           
-          # Use Python to calculate the correct date/cycle handling midnight rollover
-          # We look back 5 hours to ensure we target a run that is fully published on NOMADS
-          eval $(python3 -c '
+          # Use a Python script to calculate the correct cycle
+          # (Using a heredoc 'EOF' handles quotes safely)
+          python3 << 'EOF' > cycle_env.sh
           from datetime import datetime, timedelta
+          # Look back 5 hours to find the latest fully published run
           target = datetime.utcnow() - timedelta(hours=5)
           cycle_hour = (target.hour // 6) * 6
-          print(f"ymd={target.strftime("%Y%m%d")}")
-          print(f"cycle={cycle_hour:02d}")
-          ')
+          ymd = target.strftime("%Y%m%d")
+          
+          # Print exports for the shell to read
+          print(f"export ymd={ymd}")
+          print(f"export cycle={cycle_hour:02d}")
+          EOF
+          
+          # Load the variables we just calculated
+          source cycle_env.sh
+          rm cycle_env.sh
 
           echo "Targeting Cycle: $ymd ${cycle}z"
 
