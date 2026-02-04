@@ -28,7 +28,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gdal-bin
-          # [cite_start]Added ecmwf-opendata to the list [cite: 3]
           pip install numpy xarray cfgrib eccodes rasterio matplotlib ecmwf-opendata
 
       - name: Download latest ECMWF (Open Data)
@@ -36,19 +35,27 @@ jobs:
           mkdir -p data
           python3 << 'EOF'
           from ecmwf.opendata import Client
+          from datetime import datetime, timedelta
           import os
 
           client = Client()
           
-          print("Downloading ECMWF 250mb Wind Data...")
+          # 1. Calculate the target cycle
+          # Look back ~4 hours to ensure the run is published 
+          # (ECMWF Open Data is usually available ~1h after run time)
+          target = datetime.utcnow() - timedelta(hours=4)
           
-          # Download 250mb U and V wind components (0.25 deg resolution)
-          # step=0 is the analysis/current time
-          # date=-1 / time="latest" automatically finds the most recent run
+          # Round down to nearest 6-hour cycle (0, 6, 12, 18)
+          cycle_hour = (target.hour // 6) * 6
+          date_str = target.strftime("%Y%m%d")
+          
+          print(f"Targeting Cycle: {date_str} {cycle_hour:02d}z")
+          
+          # 2. Retrieve data using the calculated integers
           try:
               client.retrieve(
-                  date=-1,
-                  time="latest",
+                  date=date_str,     # e.g., "20231027"
+                  time=cycle_hour,   # Integer: 0, 6, 12, or 18
                   step=0,
                   type="fc",         # Forecast
                   levtype="pl",      # Pressure Levels
@@ -80,8 +87,7 @@ jobs:
               exit(1)
 
           # Open U component
-          # Note: ECMWF Open Data usually uses shortName 'u'/'v' and level 250
-          # [cite_start]We update the filename and keys from the original GFS script [cite: 8, 9]
+          # Note: ECMWF Open Data usually uses shortName 'u'/'v' and level 250.
           ds_u = xr.open_dataset(
               "data/ecmwf.grib2",
               engine="cfgrib",
@@ -107,9 +113,6 @@ jobs:
               },
           )
 
-          # Select the variable. Note: depending on the GRIB definition, 
-          # cfgrib might name the variable 'u' or 'u_component_of_wind'. 
-          # We access by standard shortName if possible, or fallback.
           u = ds_u["u"]
           v = ds_v["v"]
 
@@ -146,7 +149,7 @@ jobs:
           )
 
           # --- Color ramp (knots) ---
-          # [cite_start]Matching original coloring logic [cite: 14]
+          # Matching original coloring logic
           vmin = 20.0
           vmax = 160.0
 
@@ -184,10 +187,9 @@ jobs:
 
       - name: Generate map tiles (zoom 0-4) - WebMercator XYZ
         run: |
-          rm -rf tiles/250mb/latest
-          mkdir -p tiles/250mb/latest
-          # [cite_start]Same tile generation command [cite: 19]
-          gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 output_250mb_color.tif tiles/250mb/latest
+          rm -rf tiles/ecmwf/latest
+          mkdir -p tiles/ecmwf/latest
+          gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 output_250mb_color.tif tiles/ecmwf/latest
 
       - name: Commit updated tiles
         env:
@@ -196,7 +198,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add tiles/250mb/latest || true
+          # Add only the ECMWF tiles folder
+          git add tiles/ecmwf/latest || true
           git commit -m "Update ECMWF 250mb tiles" || echo "No changes to commit"
 
           git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}
