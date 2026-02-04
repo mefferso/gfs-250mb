@@ -1,15 +1,12 @@
 name: Build GFS 250mb Wind Tiles
 
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
 permissions:
   contents: write
-
-on:
-  push:
-    branches:
-      -main
-  schedule:
-    - cron: '15 */6 * * *'  # Run at 15 past the hour
-  workflow_dispatch:
 
 jobs:
   build:
@@ -20,7 +17,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,34 +25,31 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gdal-bin
           pip install numpy xarray cfgrib eccodes rasterio matplotlib requests
 
       - name: Download latest GFS (NOAA NOMADS)
         run: |
           mkdir -p data
-          
-          # Calculate cycle (Logic: Look back 5 hours)
-          python3 << 'EOF' > cycle_env.sh
-          from datetime import datetime, timedelta
-          target = datetime.utcnow() - timedelta(hours=5)
-          cycle_hour = (target.hour // 6) * 6
-          ymd = target.strftime("%Y%m%d")
-          print(f"export ymd={ymd}")
-          print(f"export cycle={cycle_hour:02d}")
-          EOF
-          
-          source cycle_env.sh
-          rm cycle_env.sh
-          echo "Targeting Cycle: $ymd ${cycle}z"
 
-          # NOMADS URL
-          base="https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod"
-          url="$base/gfs.$ymd/$cycle/atmos/gfs.t${cycle}z.pgrb2.0p25.f000"
-          
-          echo "Downloading $url"
-          curl -fSL "$url" -o data/gfs.grib2
+          NOW_UTC=$(date -u +"%H")
+          DATE_UTC=$(date -u +"%Y%m%d")
+
+          if [ "$NOW_UTC" -ge 18 ]; then
+            CYCLE=12
+          elif [ "$NOW_UTC" -ge 6 ]; then
+            CYCLE=00
+          else
+            CYCLE=12
+            DATE_UTC=$(date -u -d "yesterday" +"%Y%m%d")
+          fi
+
+          VALID_UTC="${DATE_UTC}${CYCLE}"
+          echo "Using VALID_UTC=${VALID_UTC}"
+
+          echo "VALID_UTC=${VALID_UTC}" >> $GITHUB_ENV
+
+          wget -q -O data/gfs.grib2 \
+            https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.${DATE_UTC}/${CYCLE}/atmos/gfs.t${CYCLE}z.pgrb2.0p25.f000
 
       - name: Generate COLOR 250mb wind GeoTIFF
         run: |
@@ -69,70 +62,77 @@ jobs:
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
 
-          # OPEN GFS FILE
-          ds_u = xr.open_dataset("data/gfs.grib2", engine="cfgrib", backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "u"}})
-          ds_v = xr.open_dataset("data/gfs.grib2", engine="cfgrib", backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "v"}})
+          ds_u = xr.open_dataset(
+              "data/gfs.grib2",
+              engine="cfgrib",
+              backend_kwargs={"filter_by_keys": {"shortName": "u"}},
+          )
+          ds_v = xr.open_dataset(
+              "data/gfs.grib2",
+              engine="cfgrib",
+              backend_kwargs={"filter_by_keys": {"shortName": "v"}},
+          )
 
           u = ds_u["u"].sel(isobaricInhPa=250)
           v = ds_v["v"].sel(isobaricInhPa=250)
 
-          # m/s -> kt
-          speed_kt = np.sqrt(u**2 + v**2) * 1.94384
+          speed = np.sqrt(u**2 + v**2) * 1.94384
 
-          # Clip to Web Mercator
-          webmerc_max = 85.05112878
-          speed_clip = speed_kt.where((speed_kt.latitude <= webmerc_max) & (speed_kt.latitude >= -webmerc_max), drop=True)
-          speed_clip = speed_clip.sortby("latitude", ascending=False)
-          speed_clip = speed_clip.assign_coords(longitude=(((speed_clip.longitude + 180) % 360) - 180)).sortby("longitude")
+          speed = speed.assign_coords(
+              longitude=(((speed.longitude + 180) % 360) - 180)
+          ).sortby("longitude").sortby("latitude", ascending=False)
 
-          lats_clip = speed_clip.latitude.values
-          lons_clip = speed_clip.longitude.values
-          dy = float(abs(lats_clip[1] - lats_clip[0]))
-          dx = float(abs(lons_clip[1] - lons_clip[0]))
-          transform = from_origin(float(lons_clip.min()), float(lats_clip.max()), dx, dy)
+          lats = speed.latitude.values
+          lons = speed.longitude.values
+          dx = abs(lons[1] - lons[0])
+          dy = abs(lats[1] - lats[0])
 
-          # Color ramp
-          vmin, vmax = 20.0, 160.0
-          data = np.clip(speed_clip.values, vmin, vmax)
-          norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
+          transform = from_origin(lons.min(), lats.max(), dx, dy)
+
+          data = np.clip(speed.values, 20, 160)
+          norm = (data - 20) / (160 - 20)
+
           cmap = plt.get_cmap("turbo")
           rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
 
-          with rasterio.open("output_250mb_color.tif", "w", driver="GTiff", height=rgb.shape[0], width=rgb.shape[1], count=3, dtype="uint8", crs="EPSG:4326", transform=transform) as dst:
-              dst.write(rgb[:, :, 0], 1)
-              dst.write(rgb[:, :, 1], 2)
-              dst.write(rgb[:, :, 2], 3)
-          print("GeoTIFF written successfully")
+          with rasterio.open(
+              "output_250mb_color.tif",
+              "w",
+              driver="GTiff",
+              height=rgb.shape[0],
+              width=rgb.shape[1],
+              count=3,
+              dtype="uint8",
+              crs="EPSG:4326",
+              transform=transform,
+          ) as dst:
+              for i in range(3):
+                  dst.write(rgb[:, :, i], i + 1)
           EOF
 
       - name: Generate map tiles (zoom 0-4)
         run: |
           rm -rf tiles/250mb/latest
           mkdir -p tiles/250mb/latest
-          gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 output_250mb_color.tif tiles/250mb/latest
-          
-          # --- NUCLEAR OPTION: FORCE UPDATE ---
-          # This creates a file with the current time. 
-          # Git will ALWAYS see this as a change, so it will ALWAYS commit.
+          gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 \
+            output_250mb_color.tif tiles/250mb/latest
+
           date > tiles/250mb/latest/last_update.txt
-            
+
       - name: Build RAOB 250mb dataset (apples-to-apples)
         env:
           VALID_UTC: ${{ env.VALID_UTC }}
         run: |
           python scripts/build_raob_250mb_dataset.py
 
-      - name: Commit updated tiles
+      - name: Commit updated tiles and RAOB data
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git add tiles/250mb/latest
-          
-          # Removed the "|| echo" so if this fails, we want to know!
-          git commit -m "Update GFS 250mb tiles (Force)"
-          
-          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}
+
+          git add tiles/250mb/latest data/raob/latest.json || true
+          git commit -m "Update GFS 250mb tiles + RAOB dataset ($VALID_UTC)" || echo "No changes"
+
           git push
