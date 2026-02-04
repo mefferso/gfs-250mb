@@ -105,7 +105,7 @@ jobs:
           transform = from_origin(float(lons_clip.min()), float(lats_clip.max()), dx, dy)
 
           # Color ramp
-          vmin, vmax = 20.0, 160.0
+          vmin, vmax = 20.0, 225.0
           data = np.clip(speed_clip.values, vmin, vmax)
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
           cmap = plt.get_cmap("turbo")
