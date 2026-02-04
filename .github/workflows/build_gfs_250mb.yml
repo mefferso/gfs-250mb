@@ -18,40 +18,77 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           pip install numpy xarray cfgrib eccodes rasterio matplotlib requests
 
-      - name: Download latest GFS (NOAA NOMADS)
+      - name: Download latest available GFS f000 (00Z/12Z) + set VALID_UTC
         run: |
+          set -e
           mkdir -p data
 
-          NOW_UTC=$(date -u +"%H")
-          DATE_UTC=$(date -u +"%Y%m%d")
+          try_fetch () {
+            local ymd="$1"
+            local cyc="$2"
+            local url="https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.${ymd}/${cyc}/atmos/gfs.t${cyc}z.pgrb2.0p25.f000"
+            echo "Trying ${ymd} ${cyc}Z -> ${url}"
 
-          if [ "$NOW_UTC" -ge 18 ]; then
-            CYCLE=12
-          elif [ "$NOW_UTC" -ge 6 ]; then
-            CYCLE=00
+            # curl fails non-200 with -f; verify file is not tiny HTML
+            if curl -fsSL --max-time 120 -o data/gfs.grib2 "${url}"; then
+              local sz
+              sz=$(stat -c%s data/gfs.grib2 || echo 0)
+              if [ "${sz}" -gt 2000000 ]; then
+                echo "Downloaded OK (${sz} bytes)"
+                echo "VALID_UTC=${ymd}${cyc}" >> $GITHUB_ENV
+                return 0
+              else
+                echo "Downloaded file too small (${sz} bytes) - treating as failure"
+              fi
+            fi
+
+            rm -f data/gfs.grib2
+            return 1
+          }
+
+          NOW_H=$(date -u +"%H")
+          TODAY=$(date -u +"%Y%m%d")
+          YDAY=$(date -u -d "yesterday" +"%Y%m%d")
+
+          # candidate order prefers most likely-available recent 00/12 cycles
+          if [ "${NOW_H}" -ge 18 ]; then
+            CANDIDATES="${TODAY}:12 ${TODAY}:00 ${YDAY}:12 ${YDAY}:00"
+          elif [ "${NOW_H}" -ge 6 ]; then
+            CANDIDATES="${TODAY}:00 ${YDAY}:12 ${YDAY}:00"
           else
-            CYCLE=12
-            DATE_UTC=$(date -u -d "yesterday" +"%Y%m%d")
+            CANDIDATES="${YDAY}:12 ${YDAY}:00"
           fi
 
-          VALID_UTC="${DATE_UTC}${CYCLE}"
+          for pair in ${CANDIDATES}; do
+            ymd="${pair%%:*}"
+            cyc="${pair##*:}"
+            if try_fetch "${ymd}" "${cyc}"; then
+              break
+            fi
+          done
+
+          if [ ! -f data/gfs.grib2 ]; then
+            echo "ERROR: Could not download any candidate GFS f000 GRIB2."
+            exit 2
+          fi
+
           echo "Using VALID_UTC=${VALID_UTC}"
 
-          echo "VALID_UTC=${VALID_UTC}" >> $GITHUB_ENV
-
-          wget -q -O data/gfs.grib2 \
-            https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.${DATE_UTC}/${CYCLE}/atmos/gfs.t${CYCLE}z.pgrb2.0p25.f000
-
-      - name: Generate COLOR 250mb wind GeoTIFF
+      - name: Generate COLOR 250mb wind GeoTIFF (vmax=225)
         run: |
           python << 'EOF'
           import xarray as xr
@@ -62,35 +99,43 @@ jobs:
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
 
+          # Force isobaricInhPa to avoid cfgrib DatasetBuildError (multiple typeOfLevel)
           ds_u = xr.open_dataset(
               "data/gfs.grib2",
               engine="cfgrib",
-              backend_kwargs={"filter_by_keys": {"shortName": "u"}},
+              backend_kwargs={
+                  "filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "u"},
+                  "indexpath": ""
+              },
           )
           ds_v = xr.open_dataset(
               "data/gfs.grib2",
               engine="cfgrib",
-              backend_kwargs={"filter_by_keys": {"shortName": "v"}},
+              backend_kwargs={
+                  "filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "v"},
+                  "indexpath": ""
+              },
           )
 
           u = ds_u["u"].sel(isobaricInhPa=250)
           v = ds_v["v"].sel(isobaricInhPa=250)
 
-          speed = np.sqrt(u**2 + v**2) * 1.94384
+          speed = np.sqrt(u**2 + v**2) * 1.94384  # kt
 
+          # shift lon to -180..180 and sort
           speed = speed.assign_coords(
               longitude=(((speed.longitude + 180) % 360) - 180)
           ).sortby("longitude").sortby("latitude", ascending=False)
 
           lats = speed.latitude.values
           lons = speed.longitude.values
-          dx = abs(lons[1] - lons[0])
-          dy = abs(lats[1] - lats[0])
+          dx = float(abs(lons[1] - lons[0]))
+          dy = float(abs(lats[1] - lats[0]))
+          transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
 
-          transform = from_origin(lons.min(), lats.max(), dx, dy)
-
-          data = np.clip(speed.values, 20, 225)
-          norm = (data - 20) / (225 - 20)
+          vmin, vmax = 20.0, 225.0
+          data = np.clip(speed.values, vmin, vmax)
+          norm = (data - vmin) / (vmax - vmin)
 
           cmap = plt.get_cmap("turbo")
           rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
@@ -106,8 +151,11 @@ jobs:
               crs="EPSG:4326",
               transform=transform,
           ) as dst:
-              for i in range(3):
-                  dst.write(rgb[:, :, i], i + 1)
+              dst.write(rgb[:, :, 0], 1)
+              dst.write(rgb[:, :, 1], 2)
+              dst.write(rgb[:, :, 2], 3)
+
+          print("GeoTIFF written successfully")
           EOF
 
       - name: Generate map tiles (zoom 0-4)
@@ -132,7 +180,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add tiles/250mb/latest data/raob/latest.json || true
+          git add tiles/250mb/latest tiles/250mb/latest/last_update.txt data/raob/latest.json || true
           git commit -m "Update GFS 250mb tiles + RAOB dataset ($VALID_UTC)" || echo "No changes"
-
           git push
