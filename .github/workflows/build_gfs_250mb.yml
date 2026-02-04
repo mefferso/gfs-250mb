@@ -4,6 +4,9 @@ permissions:
   contents: write
 
 on:
+  push:
+    branches:
+      -main
   schedule:
     - cron: '15 */6 * * *'  # Run at 15 past the hour
   workflow_dispatch:
