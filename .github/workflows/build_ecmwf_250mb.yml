@@ -58,7 +58,7 @@ jobs:
                   levtype="pl",
                   levelist=250,
                   param=["u", "v"],
-                  resol="0.25",      # <--- FORCE HIGH RES
+                  resol="0p25",      # <--- FORCE HIGH RES
                   target="data/ecmwf.grib2"
               )
               print("Download complete: data/ecmwf.grib2")
