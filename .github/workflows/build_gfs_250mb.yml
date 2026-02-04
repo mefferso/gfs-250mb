@@ -5,7 +5,7 @@ permissions:
 
 on:
   schedule:
-    - cron: '5 */6 * * *'   # every 6 hours (UTC)
+    - cron: '5 */6 * * *'   # Offset to force update
   workflow_dispatch:
 
 jobs:
@@ -30,31 +30,26 @@ jobs:
           sudo apt-get install -y gdal-bin
           pip install numpy xarray cfgrib eccodes rasterio matplotlib
 
-      - name: Download latest GFS (Dynamic Cycle)
+      - name: Download latest GFS (NOAA NOMADS)
         run: |
           mkdir -p data
           
-          # Use a Python script to calculate the correct cycle
-          # (Using a heredoc 'EOF' handles quotes safely)
+          # Calculate cycle
           python3 << 'EOF' > cycle_env.sh
           from datetime import datetime, timedelta
           # Look back 5 hours to find the latest fully published run
           target = datetime.utcnow() - timedelta(hours=5)
           cycle_hour = (target.hour // 6) * 6
           ymd = target.strftime("%Y%m%d")
-          
-          # Print exports for the shell to read
           print(f"export ymd={ymd}")
           print(f"export cycle={cycle_hour:02d}")
           EOF
           
-          # Load the variables we just calculated
           source cycle_env.sh
           rm cycle_env.sh
-
           echo "Targeting Cycle: $ymd ${cycle}z"
 
-          # Construct dynamic URL
+          # NOMADS URL
           base="https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod"
           url="$base/gfs.$ymd/$cycle/atmos/gfs.t${cycle}z.pgrb2.0p25.f000"
           
@@ -72,90 +67,43 @@ jobs:
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
 
-          ds_u = xr.open_dataset(
-              "data/gfs.grib2",
-              engine="cfgrib",
-              backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "u"}},
-          )
-
-          ds_v = xr.open_dataset(
-              "data/gfs.grib2",
-              engine="cfgrib",
-              backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "v"}},
-          )
+          # OPEN GFS FILE
+          ds_u = xr.open_dataset("data/gfs.grib2", engine="cfgrib", backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "u"}})
+          ds_v = xr.open_dataset("data/gfs.grib2", engine="cfgrib", backend_kwargs={"filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "v"}})
 
           u = ds_u["u"].sel(isobaricInhPa=250)
           v = ds_v["v"].sel(isobaricInhPa=250)
 
           # m/s -> kt
-          speed_ms = np.sqrt(u**2 + v**2)
-          speed_kt = speed_ms * 1.94384
+          speed_kt = np.sqrt(u**2 + v**2) * 1.94384
 
-          # --- Clip to Web Mercator latitude range (hard drop) ---
+          # Clip to Web Mercator latitude range
           webmerc_max = 85.05112878
-          speed_clip = speed_kt.where(
-              (speed_kt.latitude <= webmerc_max) & (speed_kt.latitude >= -webmerc_max),
-              drop=True
-          )
-
-          # Force north->south (north-up raster)
+          speed_clip = speed_kt.where((speed_kt.latitude <= webmerc_max) & (speed_kt.latitude >= -webmerc_max), drop=True)
           speed_clip = speed_clip.sortby("latitude", ascending=False)
-
-          # Wrap longitudes 0–360 -> -180–180 for web maps and sort
-          speed_clip = speed_clip.assign_coords(
-              longitude=(((speed_clip.longitude + 180) % 360) - 180)
-          ).sortby("longitude")
+          speed_clip = speed_clip.assign_coords(longitude=(((speed_clip.longitude + 180) % 360) - 180)).sortby("longitude")
 
           lats_clip = speed_clip.latitude.values
           lons_clip = speed_clip.longitude.values
-
           dy = float(abs(lats_clip[1] - lats_clip[0]))
           dx = float(abs(lons_clip[1] - lons_clip[0]))
+          transform = from_origin(float(lons_clip.min()), float(lats_clip.max()), dx, dy)
 
-          transform = from_origin(
-              float(lons_clip.min()),
-              float(lats_clip.max()),
-              dx,
-              dy
-          )
-
-          # --- Color ramp (knots) ---
-          vmin = 20.0
-          vmax = 160.0
-
+          # Color ramp
+          vmin, vmax = 20.0, 160.0
           data = np.clip(speed_clip.values, vmin, vmax)
-          norm = (data - vmin) / (vmax - vmin)
-          norm = np.clip(norm, 0.0, 1.0)
-
+          norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
           cmap = plt.get_cmap("turbo")
-          rgba = cmap(norm)
-          rgb = (rgba[..., :3] * 255).astype("uint8")
+          rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
 
-          height, width, _ = rgb.shape
-
-          with rasterio.open(
-              "output_250mb_color.tif",
-              "w",
-              driver="GTiff",
-              height=height,
-              width=width,
-              count=3,
-              dtype="uint8",
-              crs="EPSG:4326",
-              transform=transform,
-          ) as dst:
+          with rasterio.open("output_250mb_color.tif", "w", driver="GTiff", height=rgb.shape[0], width=rgb.shape[1], count=3, dtype="uint8", crs="EPSG:4326", transform=transform) as dst:
               dst.write(rgb[:, :, 0], 1)
               dst.write(rgb[:, :, 1], 2)
               dst.write(rgb[:, :, 2], 3)
-
-          print("Color 250mb wind speed GeoTIFF written successfully")
+          print("GeoTIFF written successfully")
           EOF
 
-      - name: Debug GeoTIFF bounds
-        run: |
-          gdalinfo output_250mb_color.tif | egrep "Size is|Upper Left|Lower Right"
-
-      - name: Generate map tiles (zoom 0-4) - WebMercator XYZ
+      - name: Generate map tiles (zoom 0-4)
         run: |
           rm -rf tiles/250mb/latest
           mkdir -p tiles/250mb/latest
@@ -167,9 +115,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add tiles/250mb/latest || true
           git commit -m "Update GFS 250mb tiles" || echo "No changes to commit"
-
           git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}
           git push
