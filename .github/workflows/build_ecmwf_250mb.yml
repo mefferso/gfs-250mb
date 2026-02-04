@@ -1,0 +1,136 @@
+name: Build ECMWF 250mb Wind Tiles
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: '30 */6 * * *'  # Run 30 mins after the hour to avoid GFS collision
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin
+          pip install numpy xarray cfgrib eccodes rasterio matplotlib ecmwf-opendata
+
+      - name: Download latest ECMWF (High Res)
+        run: |
+          mkdir -p data
+          python3 << 'EOF'
+          from ecmwf.opendata import Client
+          from datetime import datetime, timedelta
+          import os
+
+          client = Client()
+          
+          # Look back ~4 hours to ensure the run is published 
+          target = datetime.utcnow() - timedelta(hours=4)
+          
+          # Round down to nearest 6-hour cycle (0, 6, 12, 18)
+          cycle_hour = (target.hour // 6) * 6
+          date_str = target.strftime("%Y%m%d")
+          
+          print(f"Targeting Cycle: {date_str} {cycle_hour:02d}z")
+          
+          try:
+              client.retrieve(
+                  date=date_str,
+                  time=cycle_hour,
+                  step=0,
+                  type="fc",
+                  levtype="pl",
+                  levelist=250,
+                  param=["u", "v"],
+                  resol="0p25",      # <--- FORCE HIGH RES
+                  target="data/ecmwf.grib2"
+              )
+              print("Download complete: data/ecmwf.grib2")
+          except Exception as e:
+              print(f"Error downloading ECMWF data: {e}")
+              exit(1)
+          EOF
+
+      - name: Generate COLOR 250mb wind GeoTIFF
+        run: |
+          python << 'EOF'
+          import xarray as xr
+          import numpy as np
+          import rasterio
+          from rasterio.transform import from_origin
+          import matplotlib
+          matplotlib.use("Agg")
+          import matplotlib.pyplot as plt
+          import os
+
+          if not os.path.exists("data/ecmwf.grib2"):
+              print("Error: Input file not found.")
+              exit(1)
+
+          ds_u = xr.open_dataset("data/ecmwf.grib2", engine="cfgrib", backend_kwargs={"filter_by_keys": {"shortName": "u", "typeOfLevel": "isobaricInhPa", "level": 250}})
+          ds_v = xr.open_dataset("data/ecmwf.grib2", engine="cfgrib", backend_kwargs={"filter_by_keys": {"shortName": "v", "typeOfLevel": "isobaricInhPa", "level": 250}})
+
+          u = ds_u["u"]
+          v = ds_v["v"]
+
+          # m/s -> kt
+          speed_kt = np.sqrt(u**2 + v**2) * 1.94384
+
+          # Clip to Web Mercator latitude range
+          webmerc_max = 85.05112878
+          speed_clip = speed_kt.where((speed_kt.latitude <= webmerc_max) & (speed_kt.latitude >= -webmerc_max), drop=True)
+          speed_clip = speed_clip.sortby("latitude", ascending=False)
+          speed_clip = speed_clip.assign_coords(longitude=(((speed_clip.longitude + 180) % 360) - 180)).sortby("longitude")
+
+          lats_clip = speed_clip.latitude.values
+          lons_clip = speed_clip.longitude.values
+          dy = float(abs(lats_clip[1] - lats_clip[0]))
+          dx = float(abs(lons_clip[1] - lons_clip[0]))
+          transform = from_origin(float(lons_clip.min()), float(lats_clip.max()), dx, dy)
+
+          # Color ramp
+          vmin, vmax = 20.0, 160.0
+          data = np.clip(speed_clip.values, vmin, vmax)
+          norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
+          cmap = plt.get_cmap("turbo")
+          rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
+
+          with rasterio.open("output_250mb_color.tif", "w", driver="GTiff", height=rgb.shape[0], width=rgb.shape[1], count=3, dtype="uint8", crs="EPSG:4326", transform=transform) as dst:
+              dst.write(rgb[:, :, 0], 1)
+              dst.write(rgb[:, :, 1], 2)
+              dst.write(rgb[:, :, 2], 3)
+          print("GeoTIFF written successfully")
+          EOF
+
+      - name: Generate map tiles (zoom 0-4)
+        run: |
+          rm -rf tiles/ecmwf/latest
+          mkdir -p tiles/ecmwf/latest
+          gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 output_250mb_color.tif tiles/ecmwf/latest
+
+      - name: Commit updated tiles
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add tiles/ecmwf/latest || true
+          git commit -m "Update ECMWF 250mb tiles" || echo "No changes to commit"
+          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}
+          git push
