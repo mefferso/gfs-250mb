@@ -89,8 +89,8 @@ jobs:
 
           transform = from_origin(lons.min(), lats.max(), dx, dy)
 
-          data = np.clip(speed.values, 20, 160)
-          norm = (data - 20) / (160 - 20)
+          data = np.clip(speed.values, 20, 225)
+          norm = (data - 20) / (225 - 20)
 
           cmap = plt.get_cmap("turbo")
           rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
