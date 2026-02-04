@@ -112,6 +112,12 @@ jobs:
           # This creates a file with the current time. 
           # Git will ALWAYS see this as a change, so it will ALWAYS commit.
           date > tiles/250mb/latest/last_update.txt
+            
+      - name: Build RAOB 250mb dataset (apples-to-apples)
+        env:
+          VALID_UTC: ${{ env.VALID_UTC }}
+        run: |
+          python scripts/build_raob_250mb_dataset.py
 
       - name: Commit updated tiles
         env:
