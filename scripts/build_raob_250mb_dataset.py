@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-build_raob_250mb_dataset.py
+scripts/build_raob_250mb_dataset.py
 
-Reads RAOB obs (CSV/JSON) and samples 250mb SPEED GeoTIFFs for
-GFS / ECMWF / CMC / ICON, then writes data/raob/latest.json
-for your web map.
+- Reads RAOB obs (CSV/JSON) for all stations.
+- Samples 250mb SPEED GeoTIFFs for GFS / ECMWF / CMC / ICON.
+- Writes data/raob/latest.json in the format your map expects.
 
-- Assumes RAOB obs are in knots.
-- SPEED GeoTIFFs must be single-band (not colorized RGB).
+Assumptions:
+- Obs are in knots.
+- SPEED GeoTIFFs are single-band float (not color RGB).
+- VALID_UTC is passed via environment (YYYYMMDDHH) from the workflow.
 """
 
 from __future__ import annotations
@@ -16,13 +18,16 @@ import argparse
 import csv
 import json
 import math
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Try rasterio first, then GDAL
+MS_TO_KT = 1.9438444924406
+
+# backends
 _USE_RASTERIO = False
 _USE_GDAL = False
 
@@ -40,15 +45,12 @@ except Exception:
     except Exception:
         pass
 
-MS_TO_KT = 1.9438444924406
-
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def to_float_or_none(x: Any) -> Optional[float]:
-    # Important: treat null/"" as missing, not 0
     if x is None:
         return None
     if isinstance(x, str) and x.strip() == "":
@@ -194,16 +196,13 @@ def _resolve_candidate(explicit: Optional[str], patterns: List[str]) -> Optional
 
 def open_raster(path: Path, units: str) -> RasterInfo:
     units = (units or "kt").lower()
-    if units in ("ms", "m/s", "mps"):
-        units_norm = "ms"
-    else:
-        units_norm = "kt"
+    units_norm = "ms" if units in ("ms", "m/s", "mps") else "kt"
 
     if _USE_RASTERIO:
         import rasterio
 
         with rasterio.open(path) as ds:
-            b = ds.bounds  # left, bottom, right, top
+            b = ds.bounds
             nodata = ds.nodata
             return RasterInfo(
                 path=path,
@@ -380,7 +379,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="in_path", default="", help="Input obs CSV/JSON (station, name, lat, lon, obs)")
     ap.add_argument("--out", dest="out_path", default="data/raob/latest.json", help="Output JSON path")
-    ap.add_argument("--valid-utc", dest="valid_utc", default="", help="Valid UTC (e.g. 2026-02-04T00:00Z)")
+    ap.add_argument("--valid-utc", dest="valid_utc", default="", help="Valid UTC (YYYY-MM-DDTHHZ)")
 
     ap.add_argument("--gfs-tif", default="", help="GFS speed GeoTIFF")
     ap.add_argument("--ecmwf-tif", default="", help="ECMWF speed GeoTIFF")
@@ -398,7 +397,7 @@ def main() -> int:
         print("ERROR: need rasterio or GDAL to sample GeoTIFFs", file=sys.stderr)
         return 2
 
-    # ---- obs file ----
+    # obs file
     in_path = Path(args.in_path) if args.in_path else None
     if in_path is None:
         for cand in [
@@ -419,29 +418,42 @@ def main() -> int:
         print("ERROR: parsed 0 obs rows", file=sys.stderr)
         return 2
 
-    valid_utc = (args.valid_utc or valid_guess or obs_rows[0].valid_utc or "").strip()
-    if not valid_utc:
+    # valid time: env VALID_UTC (YYYYMMDDHH) -> ISO, or args / guess
+    v_env = os.environ.get("VALID_UTC", "").strip()
+    v_arg = args.valid_utc.strip()
+    valid_utc = ""
+
+    if v_arg:
+        valid_utc = v_arg
+    elif v_env and len(v_env) == 10:
+        # YYYYMMDDHH -> YYYY-MM-DDTHHZ
+        valid_utc = f"{v_env[0:4]}-{v_env[4:6]}-{v_env[6:8]}T{v_env[8:10]}:00Z"
+    elif valid_guess:
+        valid_utc = valid_guess
+    elif obs_rows[0].valid_utc:
+        valid_utc = obs_rows[0].valid_utc
+    else:
         valid_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00Z")
 
-    # ---- rasters ----
+    # rasters
     def resolve(explicit: str, pats: List[str]) -> Optional[Path]:
         return _resolve_candidate(explicit or None, pats)
 
     gfs_path = resolve(
         args.gfs_tif,
-        ["**/*gfs*250*speed*.tif", "**/*gfs*250*.tif", "**/output_250mb*.tif"],
+        ["output_250mb_speed.tif", "**/*gfs*250*speed*.tif", "**/output_250mb_speed*.tif"],
     )
     ecmwf_path = resolve(
         args.ecmwf_tif,
-        ["**/*ecmwf*250*speed*.tif", "**/*ecmwf*250*.tif"],
+        ["**/*ecmwf*250*speed*.tif"],
     )
     cmc_path = resolve(
         args.cmc_tif,
-        ["**/*cmc*250*speed*.tif", "**/*gem*250*speed*.tif", "**/*cmc*250*.tif"],
+        ["**/*cmc*250*speed*.tif", "**/*gem*250*speed*.tif"],
     )
     icon_path = resolve(
         args.icon_tif,
-        ["**/*icon*250*speed*.tif", "**/*icon*250*.tif"],
+        ["**/*icon*250*speed*.tif"],
     )
 
     def safe_open(p: Optional[Path], units: str, label: str) -> Optional[RasterInfo]:
