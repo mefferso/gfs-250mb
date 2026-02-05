@@ -45,66 +45,99 @@ jobs:
           from ecmwf.opendata import Client
           from datetime import datetime, timedelta
           import os
+          import xarray as xr
 
           client = Client()
-
-          # candidate cycles: prefer most recent that should be published
-          now = datetime.utcnow()
-          # give ECMWF time to publish
-          target = now - timedelta(hours=6)
-
-          today = target.strftime("%Y%m%d")
-          yday = (target - timedelta(days=1)).strftime("%Y%m%d")
-
-          # ECMWF open data HRES is typically 00/12; we try both today then yesterday
-          candidates = [
-              (today, 12),
-              (today, 0),
-              (yday, 12),
-              (yday, 0),
-          ]
 
           out_path = "data/ecmwf.grib2"
           env_path = os.environ.get("GITHUB_ENV")
 
+          def validate_grib(path: str) -> bool:
+            try:
+              for sn in ("u", "v"):
+                ds = xr.open_dataset(
+                  path,
+                  engine="cfgrib",
+                  backend_kwargs={
+                    "filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": sn},
+                    "indexpath": ""
+                  },
+                )
+                if sn not in ds:
+                  return False
+                # must be able to select 250 hPa without error
+                _ = ds[sn].sel(isobaricInhPa=250)
+              return True
+            except Exception as e:
+              print(f"Validation failed: {e}")
+              return False
+
           def attempt(date_str, hour):
-              print(f"Trying ECMWF: {date_str} {hour:02d}z")
-              client.retrieve(
-                  date=date_str,
-                  time=hour,
-                  step=0,
-                  type="fc",
-                  levtype="pl",
-                  levelist=250,
-                  param=["u", "v"],
-                  resol="0p25",
-                  target=out_path
-              )
-              # sanity check size
-              try:
-                  sz = os.path.getsize(out_path)
-              except Exception:
-                  sz = 0
-              print(f"Downloaded size: {sz} bytes")
-              return sz > 2_000_000
+            print(f"Trying ECMWF: {date_str} {hour:02d}z")
+            if os.path.exists(out_path):
+              os.remove(out_path)
+
+            client.retrieve(
+              date=date_str,
+              time=hour,
+              step=0,
+              type="fc",
+              levtype="pl",
+              levelist=250,
+              param=["u", "v"],
+              resol="0p25",
+              target=out_path
+            )
+
+            try:
+              sz = os.path.getsize(out_path)
+            except Exception:
+              sz = 0
+
+            print(f"Downloaded size: {sz} bytes")
+
+            # ECMWF u/v @ 250mb can be ~1–2 MB. Size check is minimal; real check is cfgrib validation.
+            if sz < 200_000:
+              print("Too small; treating as failure.")
+              return False
+
+            if validate_grib(out_path):
+              print("Validation OK.")
+              return True
+
+            print("Validation NOT OK; treating as failure.")
+            return False
+
+          # pick cycles (00/12) with a little lag for publishing
+          now = datetime.utcnow() - timedelta(hours=6)
+          today = now.strftime("%Y%m%d")
+          yday = (now - timedelta(days=1)).strftime("%Y%m%d")
+
+          candidates = [
+            (today, 12),
+            (today, 0),
+            (yday, 12),
+            (yday, 0),
+          ]
 
           ok = False
           chosen = None
+
           for date_str, hour in candidates:
-              try:
-                  if attempt(date_str, hour):
-                      ok = True
-                      chosen = f"{date_str}{hour:02d}"
-                      break
-              except Exception as e:
-                  print(f"Attempt failed: {e}")
+            try:
+              if attempt(date_str, hour):
+                ok = True
+                chosen = f"{date_str}{hour:02d}"
+                break
+            except Exception as e:
+              print(f"Attempt failed: {e}")
 
           if not ok:
-              raise SystemExit("ERROR: Could not download any candidate ECMWF cycle.")
+            raise SystemExit("ERROR: Could not download any candidate ECMWF cycle.")
 
           if env_path:
-              with open(env_path, "a", encoding="utf-8") as f:
-                  f.write(f"ECMWF_VALID_UTC={chosen}\n")
+            with open(env_path, "a", encoding="utf-8") as f:
+              f.write(f"ECMWF_VALID_UTC={chosen}\n")
 
           print(f"Using ECMWF_VALID_UTC={chosen}")
           EOF
@@ -150,7 +183,7 @@ jobs:
           # m/s -> kt
           speed = np.sqrt(u**2 + v**2) * 1.94384
 
-          # normalize lon to [-180, 180], sort, and clip to WebMerc
+          # normalize lon to [-180, 180], sort, clip to WebMerc
           speed = speed.assign_coords(
               longitude=(((speed.longitude + 180) % 360) - 180)
           ).sortby("longitude").sortby("latitude", ascending=False)
@@ -158,12 +191,11 @@ jobs:
 
           lats = speed.latitude.values
           lons = speed.longitude.values
-
           dx = float(abs(lons[1] - lons[0]))
           dy = float(abs(lats[1] - lats[0]))
           transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
 
-          # RAW SPEED for sampling
+          # RAW
           with rasterio.open(
               "ecmwf_output_250mb_speed.tif",
               "w",
@@ -178,7 +210,7 @@ jobs:
           ) as dst:
               dst.write(speed.values.astype("float32"), 1)
 
-          # COLOR for tiles
+          # COLOR
           vmin, vmax = 20.0, 225.0
           data = np.clip(speed.values, vmin, vmax)
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
