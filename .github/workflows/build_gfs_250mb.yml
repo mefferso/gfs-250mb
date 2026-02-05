@@ -190,11 +190,57 @@ jobs:
 
           date > tiles/250mb/latest/last_update.txt
 
+      # --- ADDITION #1: debug + detect where your obs input file actually is ---
+      - name: Debug + detect RAOB obs input file
+        run: |
+          set -e
+
+          echo "=== ls -lah data/raob ==="
+          ls -lah data/raob || true
+
+          echo "=== find obs-like files under data/ (maxdepth 4) ==="
+          find data -maxdepth 4 -type f \( -iname "*obs*.json" -o -iname "*obs*.csv" \) -print || true
+
+          # Priority order: what build_raob_250mb_dataset.py expects by default,
+          # then a best-guess fallback match.
+          SEL=""
+          if [ -f data/raob/obs_latest.json ]; then
+            SEL="data/raob/obs_latest.json"
+          elif [ -f data/raob/obs_latest.csv ]; then
+            SEL="data/raob/obs_latest.csv"
+          elif [ -f data/raob/latest_obs.csv ]; then
+            SEL="data/raob/latest_obs.csv"
+          else
+            SEL=$(find data -maxdepth 4 -type f \( -iname "*obs*.json" -o -iname "*obs*.csv" \) -print | head -n 1 || true)
+          fi
+
+          if [ -n "${SEL}" ] && [ -f "${SEL}" ]; then
+            echo "OBS_IN=${SEL}" >> $GITHUB_ENV
+            echo "Selected OBS_IN=${SEL}"
+          else
+            echo "OBS_IN=" >> $GITHUB_ENV
+            echo "Selected OBS_IN=<none>"
+            if [ -f data/raob/latest.json ]; then
+              echo "NOTE: data/raob/latest.json exists, but that's the OUTPUT dataset, not a dedicated obs input file."
+            fi
+          fi
+
+      # --- ADDITION #2: pass --in explicitly (and pass the GFS speed tif explicitly) ---
       - name: Build RAOB 250mb dataset (apples-to-apples)
         env:
           VALID_UTC: ${{ env.VALID_UTC }}
+          OBS_IN: ${{ env.OBS_IN }}
         run: |
-          python scripts/build_raob_250mb_dataset.py
+          set -e
+          if [ -z "${OBS_IN}" ] || [ ! -f "${OBS_IN}" ]; then
+            echo "ERROR: No RAOB obs input file found. See the previous Debug step output."
+            exit 2
+          fi
+
+          python scripts/build_raob_250mb_dataset.py \
+            --in "${OBS_IN}" \
+            --gfs-tif output_250mb_speed.tif \
+            --gfs-units kt
 
       - name: Commit updated tiles and RAOB data
         env:
