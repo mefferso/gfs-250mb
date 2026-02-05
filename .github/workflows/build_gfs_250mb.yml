@@ -148,11 +148,22 @@ jobs:
           ) as dst:
               dst.write(speed.values.astype("float32"), 1)
 
-          # MAKE COLORIZED FOR TILES
-          vmin, vmax = 20.0, 225.0
-          data = np.clip(speed.values, vmin, vmax)
-          norm = (data - vmin) / (vmax - vmin)
-          cmap = plt.get_cmap("turbo")
+          # Color ramp
+          vmin, vmax = 20.0, 200.0  # <--- RANGE LINE
+          data = np.clip(speed_clip.values, vmin, vmax) # Note: variable might be 'speed.values' in GFS script
+          norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
+          
+          # --- CUSTOM COLORMAP: Turbo -> White ---
+          import matplotlib.colors as mcolors
+          turbo = plt.get_cmap("turbo")
+          # Get standard turbo colors
+          colors = turbo(np.linspace(0, 1, 255))
+          # Add pure white to the very end
+          white = np.array([[1, 1, 1, 1]])
+          new_colors = np.vstack((colors, white))
+          cmap = mcolors.LinearSegmentedColormap.from_list("TurboWhite", new_colors)
+          # ---------------------------------------
+
           rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
 
           with rasterio.open(
