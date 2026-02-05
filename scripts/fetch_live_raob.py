@@ -52,7 +52,7 @@ def load_stations():
             return {}
         return {fn.strip().upper(): fn for fn in fieldnames}
 
-    for csv_file in csv_files:
+        for csv_file in csv_files:
         try:
             with open(csv_file, "r", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
@@ -63,7 +63,8 @@ def load_stations():
                 # Keys we’ll accept for each field
                 id_candidates = [
                     "STAT", "ID", "STATION", "WMO",
-                    "STATION_ID", "ICAO", "ICAO_ID", "RAOB_ID"
+                    "STATION_ID", "ICAO", "ICAO_ID", "RAOB_ID",
+                    "IDENTIFIER"           # <-- your column
                 ]
                 lat_candidates = [
                     "LAT", "LATITUDE", "Y", "LAT_DEG", "LAT_DEGREES"
@@ -72,7 +73,8 @@ def load_stations():
                     "LON", "LONGITUDE", "X", "LON_DEG", "LON_DEGREES"
                 ]
                 name_candidates = [
-                    "NAME", "STATION NAME", "CITY", "DESCRIPTION"
+                    "NAME", "STATION NAME", "CITY", "DESCRIPTION",
+                    "LOCATION NAME"        # <-- your column
                 ]
 
                 def get_val(row, candidates):
