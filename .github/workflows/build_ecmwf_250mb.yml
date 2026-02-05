@@ -120,7 +120,7 @@ jobs:
               dst.write(speed_clip.values.astype("float32"), 1)
 
           # --- 2. WRITE COLOR TILES (RGB for Map) ---
-          vmin, vmax = 20.0, 225.0
+          vmin, vmax = 20.0, 200.0
           data = np.clip(speed_clip.values, vmin, vmax)
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
           cmap = plt.get_cmap("turbo")
