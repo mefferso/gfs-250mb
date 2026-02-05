@@ -30,7 +30,6 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          # Added pandas and requests explicitly for the fetch script
           pip install numpy xarray cfgrib eccodes rasterio matplotlib requests pandas
 
       - name: Download latest available GFS f000 (00Z/12Z) + set VALID_UTC
@@ -97,6 +96,7 @@ jobs:
           import matplotlib
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
+          import matplotlib.colors as mcolors
 
           WEBMERC_MAXLAT = 85.0511
 
@@ -149,12 +149,13 @@ jobs:
               dst.write(speed.values.astype("float32"), 1)
 
           # Color ramp
-          vmin, vmax = 20.0, 200.0  # <--- RANGE LINE
-          data = np.clip(speed_clip.values, vmin, vmax) # Note: variable might be 'speed.values' in GFS script
+          vmin, vmax = 20.0, 225.0
+          
+          # Fix: Use 'speed.values' here, NOT 'speed_clip.values'
+          data = np.clip(speed.values, vmin, vmax)
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
           
           # --- CUSTOM COLORMAP: Turbo -> White ---
-          import matplotlib.colors as mcolors
           turbo = plt.get_cmap("turbo")
           # Get standard turbo colors
           colors = turbo(np.linspace(0, 1, 255))
@@ -192,7 +193,6 @@ jobs:
             output_250mb_color.tif tiles/250mb/latest
           date > tiles/250mb/latest/last_update.txt
 
-      # --- NEW STEP: Fetch fresh RAOB data from IEM ---
       - name: Fetch Live RAOB Data
         run: |
           echo "Fetching latest RAOBs..."
@@ -203,7 +203,6 @@ jobs:
           VALID_UTC: ${{ env.VALID_UTC }}
         run: |
           set -e
-          # Explicitly pointing to the output of fetch_live_raob.py
           OBS_IN="data/raob/obs_latest.csv"
 
           if [ ! -f "${OBS_IN}" ]; then
@@ -211,7 +210,6 @@ jobs:
             exit 2
           fi
 
-          # This script now merges GFS data into latest.json without deleting other models
           python scripts/build_raob_250mb_dataset.py \
             --in "${OBS_IN}" \
             --gfs-tif output_250mb_speed.tif \
@@ -224,7 +222,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Add the fetched obs and the updated JSON
           git add tiles/250mb/latest tiles/250mb/latest/last_update.txt data/raob/latest.json || true
           
           git commit -m "Update GFS 250mb tiles + RAOB dataset ($VALID_UTC)" || echo "No changes"
