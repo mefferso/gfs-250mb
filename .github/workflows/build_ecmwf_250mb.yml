@@ -1,12 +1,16 @@
 name: Build ECMWF 250mb Wind Tiles
 
-permissions:
-  contents: write
-
 on:
   schedule:
-    - cron: '30 */6 * * *'  # Run 30 mins after the hour to avoid GFS collision
+    - cron: "30 */6 * * *"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -17,57 +21,95 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gdal-bin
-          pip install numpy xarray cfgrib eccodes rasterio matplotlib ecmwf-opendata requests pandas
+          pip install numpy xarray cfgrib eccodes rasterio matplotlib requests pandas ecmwf-opendata
 
-      - name: Download latest ECMWF (High Res)
+      - name: Download latest available ECMWF (High Res) + set ECMWF_VALID_UTC
         run: |
+          set -e
           mkdir -p data
+
           python3 << 'EOF'
           from ecmwf.opendata import Client
           from datetime import datetime, timedelta
           import os
 
           client = Client()
-          
-          # Look back ~4 hours to ensure the run is published 
-          target = datetime.utcnow() - timedelta(hours=6)
-          
-          # Round down to nearest 6-hour cycle (0, 6, 12, 18)
-          cycle_hour = (target.hour // 6) * 6
-          date_str = target.strftime("%Y%m%d")
-          
-          print(f"Targeting Cycle: {date_str} {cycle_hour:02d}z")
-          
-          try:
+
+          # candidate cycles: prefer most recent that should be published
+          now = datetime.utcnow()
+          # give ECMWF time to publish
+          target = now - timedelta(hours=6)
+
+          today = target.strftime("%Y%m%d")
+          yday = (target - timedelta(days=1)).strftime("%Y%m%d")
+
+          # ECMWF open data HRES is typically 00/12; we try both today then yesterday
+          candidates = [
+              (today, 12),
+              (today, 0),
+              (yday, 12),
+              (yday, 0),
+          ]
+
+          out_path = "data/ecmwf.grib2"
+          env_path = os.environ.get("GITHUB_ENV")
+
+          def attempt(date_str, hour):
+              print(f"Trying ECMWF: {date_str} {hour:02d}z")
               client.retrieve(
                   date=date_str,
-                  time=cycle_hour,
+                  time=hour,
                   step=0,
                   type="fc",
                   levtype="pl",
                   levelist=250,
                   param=["u", "v"],
-                  resol="0p25",      # <--- FORCE HIGH RES
-                  target="data/ecmwf.grib2"
+                  resol="0p25",
+                  target=out_path
               )
-              print("Download complete: data/ecmwf.grib2")
-          except Exception as e:
-              print(f"Error downloading ECMWF data: {e}")
-              exit(1)
+              # sanity check size
+              try:
+                  sz = os.path.getsize(out_path)
+              except Exception:
+                  sz = 0
+              print(f"Downloaded size: {sz} bytes")
+              return sz > 2_000_000
+
+          ok = False
+          chosen = None
+          for date_str, hour in candidates:
+              try:
+                  if attempt(date_str, hour):
+                      ok = True
+                      chosen = f"{date_str}{hour:02d}"
+                      break
+              except Exception as e:
+                  print(f"Attempt failed: {e}")
+
+          if not ok:
+              raise SystemExit("ERROR: Could not download any candidate ECMWF cycle.")
+
+          if env_path:
+              with open(env_path, "a", encoding="utf-8") as f:
+                  f.write(f"ECMWF_VALID_UTC={chosen}\n")
+
+          print(f"Using ECMWF_VALID_UTC={chosen}")
           EOF
 
-      - name: Generate Speed GeoTIFFs (Raw + Color)
+      - name: Generate ECMWF 250mb GeoTIFFs (Raw + Color)
         run: |
           python << 'EOF'
           import xarray as xr
@@ -77,59 +119,93 @@ jobs:
           import matplotlib
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
+          import matplotlib.colors as mcolors
           import os
 
+          WEBMERC_MAXLAT = 85.05112878
+
           if not os.path.exists("data/ecmwf.grib2"):
-              print("Error: Input file not found.")
-              exit(1)
+              raise SystemExit("ERROR: data/ecmwf.grib2 not found.")
 
-          ds_u = xr.open_dataset("data/ecmwf.grib2", engine="cfgrib", backend_kwargs={"filter_by_keys": {"shortName": "u", "typeOfLevel": "isobaricInhPa", "level": 250}})
-          ds_v = xr.open_dataset("data/ecmwf.grib2", engine="cfgrib", backend_kwargs={"filter_by_keys": {"shortName": "v", "typeOfLevel": "isobaricInhPa", "level": 250}})
+          ds_u = xr.open_dataset(
+              "data/ecmwf.grib2",
+              engine="cfgrib",
+              backend_kwargs={
+                  "filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "u"},
+                  "indexpath": ""
+              },
+          )
+          ds_v = xr.open_dataset(
+              "data/ecmwf.grib2",
+              engine="cfgrib",
+              backend_kwargs={
+                  "filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "v"},
+                  "indexpath": ""
+              },
+          )
 
-          u = ds_u["u"]
-          v = ds_v["v"]
+          u = ds_u["u"].sel(isobaricInhPa=250)
+          v = ds_v["v"].sel(isobaricInhPa=250)
 
           # m/s -> kt
-          speed_kt = np.sqrt(u**2 + v**2) * 1.94384
+          speed = np.sqrt(u**2 + v**2) * 1.94384
 
-          # Clip to Web Mercator latitude range
-          webmerc_max = 85.05112878
-          speed_clip = speed_kt.where((speed_kt.latitude <= webmerc_max) & (speed_kt.latitude >= -webmerc_max), drop=True)
-          speed_clip = speed_clip.sortby("latitude", ascending=False)
-          speed_clip = speed_clip.assign_coords(longitude=(((speed_clip.longitude + 180) % 360) - 180)).sortby("longitude")
+          # normalize lon to [-180, 180], sort, and clip to WebMerc
+          speed = speed.assign_coords(
+              longitude=(((speed.longitude + 180) % 360) - 180)
+          ).sortby("longitude").sortby("latitude", ascending=False)
+          speed = speed.sel(latitude=slice(WEBMERC_MAXLAT, -WEBMERC_MAXLAT))
 
-          lats_clip = speed_clip.latitude.values
-          lons_clip = speed_clip.longitude.values
-          dy = float(abs(lats_clip[1] - lats_clip[0]))
-          dx = float(abs(lons_clip[1] - lons_clip[0]))
-          transform = from_origin(float(lons_clip.min()), float(lats_clip.max()), dx, dy)
+          lats = speed.latitude.values
+          lons = speed.longitude.values
 
-          # --- 1. WRITE RAW SPEED (Floating Point for Data Sampling) ---
+          dx = float(abs(lons[1] - lons[0]))
+          dy = float(abs(lats[1] - lats[0]))
+          transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
+
+          # RAW SPEED for sampling
           with rasterio.open(
-              "output_250mb_speed.tif",
+              "ecmwf_output_250mb_speed.tif",
               "w",
               driver="GTiff",
-              height=speed_clip.shape[0],
-              width=speed_clip.shape[1],
+              height=speed.shape[0],
+              width=speed.shape[1],
               count=1,
               dtype="float32",
               crs="EPSG:4326",
               transform=transform,
               nodata=np.nan,
           ) as dst:
-              dst.write(speed_clip.values.astype("float32"), 1)
+              dst.write(speed.values.astype("float32"), 1)
 
-          # --- 2. WRITE COLOR TILES (RGB for Map) ---
-          vmin, vmax = 20.0, 200.0
-          data = np.clip(speed_clip.values, vmin, vmax)
+          # COLOR for tiles
+          vmin, vmax = 20.0, 225.0
+          data = np.clip(speed.values, vmin, vmax)
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
-          cmap = plt.get_cmap("turbo")
+
+          turbo = plt.get_cmap("turbo")
+          colors = turbo(np.linspace(0, 1, 255))
+          white = np.array([[1, 1, 1, 1]])
+          new_colors = np.vstack((colors, white))
+          cmap = mcolors.LinearSegmentedColormap.from_list("TurboWhite", new_colors)
+
           rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
 
-          with rasterio.open("output_250mb_color.tif", "w", driver="GTiff", height=rgb.shape[0], width=rgb.shape[1], count=3, dtype="uint8", crs="EPSG:4326", transform=transform) as dst:
+          with rasterio.open(
+              "ecmwf_output_250mb_color.tif",
+              "w",
+              driver="GTiff",
+              height=rgb.shape[0],
+              width=rgb.shape[1],
+              count=3,
+              dtype="uint8",
+              crs="EPSG:4326",
+              transform=transform,
+          ) as dst:
               dst.write(rgb[:, :, 0], 1)
               dst.write(rgb[:, :, 1], 2)
               dst.write(rgb[:, :, 2], 3)
+
           print("GeoTIFFs written successfully")
           EOF
 
@@ -137,33 +213,53 @@ jobs:
         run: |
           rm -rf tiles/ecmwf/latest
           mkdir -p tiles/ecmwf/latest
-          gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 output_250mb_color.tif tiles/ecmwf/latest
+          gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 \
+            ecmwf_output_250mb_color.tif tiles/ecmwf/latest
+          date > tiles/ecmwf/latest/last_update.txt
 
       - name: Update Dataset (Fill ECMWF Data)
         run: |
           set -e
-          # We use latest.json as INPUT to preserve GFS/Obs data
-          # We use output_250mb_speed.tif (raw data) to sample winds
-          
           if [ -f "data/raob/latest.json" ]; then
             python scripts/build_raob_250mb_dataset.py \
               --in "data/raob/latest.json" \
               --out "data/raob/latest.json" \
-              --ecmwf-tif output_250mb_speed.tif \
+              --ecmwf-tif ecmwf_output_250mb_speed.tif \
               --ecmwf-units kt
           else
-            echo "Warning: latest.json not found. Skipping data merge."
+            echo "WARNING: data/raob/latest.json not found. Skipping merge."
           fi
 
-      - name: Commit updated tiles
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Commit updated ECMWF tiles + dataset
+        shell: bash
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Add tiles AND the updated JSON
-          git add tiles/ecmwf/latest data/raob/latest.json || true
-          
-          git commit -m "Update ECMWF 250mb tiles + Data" || echo "No changes to commit"
-          git push
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          git checkout main
+          git pull --rebase origin main
+
+          git add tiles/ecmwf/latest tiles/ecmwf/latest/last_update.txt data/raob/latest.json || true
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Update ECMWF 250mb tiles + dataset (${ECMWF_VALID_UTC:-unknown})"
+
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "Push succeeded."
+              exit 0
+            fi
+            echo "Push rejected (non-fast-forward). Rebasing and retrying... attempt ${attempt}"
+            git fetch origin main
+            git pull --rebase origin main
+          done
+
+          echo "ERROR: push failed after retries."
+          exit 1
