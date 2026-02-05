@@ -201,6 +201,7 @@ jobs:
           echo "=== find obs-like files under data/ (maxdepth 4) ==="
           find data -maxdepth 4 -type f \( -iname "*obs*.json" -o -iname "*obs*.csv" \) -print || true
 
+          # Priority order: dedicated obs files first
           SEL=""
           if [ -f data/raob/obs_latest.json ]; then
             SEL="data/raob/obs_latest.json"
@@ -233,7 +234,7 @@ jobs:
 
           python scripts/build_raob_250mb_dataset.py \
             --in "${OBS_IN}" \
-            --gfs-tif "" \
+            --gfs-tif output_250mb_speed.tif \
             --gfs-units kt
 
       - name: Commit updated tiles and RAOB data
