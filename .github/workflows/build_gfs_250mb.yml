@@ -201,8 +201,7 @@ jobs:
           echo "=== find obs-like files under data/ (maxdepth 4) ==="
           find data -maxdepth 4 -type f \( -iname "*obs*.json" -o -iname "*obs*.csv" \) -print || true
 
-          # Priority order: what build_raob_250mb_dataset.py expects by default,
-          # then a best-guess fallback match.
+          # Priority order: dedicated obs files first
           SEL=""
           if [ -f data/raob/obs_latest.json ]; then
             SEL="data/raob/obs_latest.json"
@@ -210,41 +209,12 @@ jobs:
             SEL="data/raob/obs_latest.csv"
           elif [ -f data/raob/latest_obs.csv ]; then
             SEL="data/raob/latest_obs.csv"
-          else
-            SEL=$(find data -maxdepth 4 -type f \( -iname "*obs*.json" -o -iname "*obs*.csv" \) -print | head -n 1 || true)
           fi
 
-          # IMPORTANT: you currently only have data/raob/latest.json in the repo.
-          # That file is the map's OUTPUT dataset, but it ALSO contains lat/lon/obs,
-          # so we can safely use it as the obs INPUT until we add a true obs fetch step.
+          # Fallback: use latest.json as obs input if nothing else exists
           if [ -z "${SEL}" ] && [ -f data/raob/latest.json ]; then
-            echo "No dedicated obs_latest.* found; attempting to use data/raob/latest.json as obs input..."
-            python - << 'PY'
-import json
-from pathlib import Path
-p = Path('data/raob/latest.json')
-try:
-    obj = json.loads(p.read_text(encoding='utf-8'))
-except Exception:
-    raise SystemExit(1)
-rows = obj.get('rows', []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
-ok = False
-for r in rows[:2000]:
-    if not isinstance(r, dict):
-        continue
-    lat = r.get('lat') or r.get('latitude')
-    lon = r.get('lon') or r.get('longitude')
-    obs = r.get('obs') or r.get('obs_kt') or r.get('raob_speed_kt')
-    sid = r.get('station') or r.get('id') or r.get('wmo') or r.get('icao')
-    if lat is not None and lon is not None and obs is not None and sid:
-        ok = True
-        break
-print('latest.json usable as obs input:', ok)
-raise SystemExit(0 if ok else 1)
-PY
-            if [ $? -eq 0 ]; then
-              SEL="data/raob/latest.json"
-            fi
+            echo "No dedicated obs_latest.* found; using data/raob/latest.json as obs input"
+            SEL="data/raob/latest.json"
           fi
 
           if [ -n "${SEL}" ] && [ -f "${SEL}" ]; then
