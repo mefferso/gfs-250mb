@@ -2,7 +2,7 @@ name: Build GFS 250mb Wind Tiles
 
 on:
   workflow_dispatch:
-  schedule:
+  schedule: 
     - cron: '0 */6 * * *'
 
 permissions:
