@@ -1,4 +1,3 @@
-# .github/workflows/build_gfs_250mb.yml
 name: Build GFS 250mb Wind Tiles
 
 on:
@@ -31,7 +30,8 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install numpy xarray cfgrib eccodes rasterio matplotlib requests
+          # Added pandas and requests explicitly for the fetch script
+          pip install numpy xarray cfgrib eccodes rasterio matplotlib requests pandas
 
       - name: Download latest available GFS f000 (00Z/12Z) + set VALID_UTC
         run: |
@@ -87,7 +87,7 @@ jobs:
 
           echo "Using VALID_UTC=${VALID_UTC}"
 
-      - name: Generate COLOR 250mb wind GeoTIFF (vmax=225, clipped to WebMercator lat range)
+      - name: Generate COLOR 250mb wind GeoTIFF
         run: |
           python << 'EOF'
           import xarray as xr
@@ -98,10 +98,8 @@ jobs:
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
 
-          # Web Mercator is only valid to about ±85.0511°
           WEBMERC_MAXLAT = 85.0511
 
-          # Force isobaricInhPa so cfgrib doesn't choke on multiple u/v fields
           ds_u = xr.open_dataset(
               "data/gfs.grib2",
               engine="cfgrib",
@@ -122,15 +120,10 @@ jobs:
           u = ds_u["u"].sel(isobaricInhPa=250)
           v = ds_v["v"].sel(isobaricInhPa=250)
 
-          # Wind speed in kt
           speed = np.sqrt(u**2 + v**2) * 1.94384
-
-          # shift lon to -180..180 and sort
           speed = speed.assign_coords(
               longitude=(((speed.longitude + 180) % 360) - 180)
           ).sortby("longitude").sortby("latitude", ascending=False)
-
-          # CLIP to avoid invalid latitude in web mercator reprojection
           speed = speed.sel(latitude=slice(WEBMERC_MAXLAT, -WEBMERC_MAXLAT))
 
           lats = speed.latitude.values
@@ -140,7 +133,7 @@ jobs:
           dy = float(abs(lats[1] - lats[0]))
           transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
 
-          # --- WRITE RAW SPEED GeoTIFF (for RAOB sampling) ---
+          # WRITE RAW SPEED (for sampling)
           with rasterio.open(
               "output_250mb_speed.tif",
               "w",
@@ -155,11 +148,10 @@ jobs:
           ) as dst:
               dst.write(speed.values.astype("float32"), 1)
 
-          # --- MAKE COLORIZED GeoTIFF FOR TILES ---
+          # MAKE COLORIZED FOR TILES
           vmin, vmax = 20.0, 225.0
           data = np.clip(speed.values, vmin, vmax)
           norm = (data - vmin) / (vmax - vmin)
-
           cmap = plt.get_cmap("turbo")
           rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
 
@@ -178,7 +170,7 @@ jobs:
               dst.write(rgb[:, :, 1], 2)
               dst.write(rgb[:, :, 2], 3)
 
-          print("GeoTIFFs written successfully (speed + color)")
+          print("GeoTIFFs written successfully")
           EOF
 
       - name: Generate map tiles (zoom 0-4)
@@ -187,51 +179,28 @@ jobs:
           mkdir -p tiles/250mb/latest
           gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 \
             output_250mb_color.tif tiles/250mb/latest
-
           date > tiles/250mb/latest/last_update.txt
 
-      # --- ADDITION #1: debug + detect where your obs input file actually is ---
-      - name: Debug + detect RAOB obs input file
+      # --- NEW STEP: Fetch fresh RAOB data from IEM ---
+      - name: Fetch Live RAOB Data
         run: |
-          set -e
+          echo "Fetching latest RAOBs..."
+          python scripts/fetch_live_raob.py
 
-          echo "=== ls -lah data/raob ==="
-          ls -lah data/raob || true
-
-          echo "=== find obs-like files under data/ (maxdepth 4) ==="
-          find data -maxdepth 4 -type f \( -iname "*obs*.json" -o -iname "*obs*.csv" \) -print || true
-
-          # Priority order: dedicated obs files first
-          SEL=""
-          if [ -f data/raob/obs_latest.json ]; then
-            SEL="data/raob/obs_latest.json"
-          elif [ -f data/raob/obs_latest.csv ]; then
-            SEL="data/raob/obs_latest.csv"
-          elif [ -f data/raob/latest_obs.csv ]; then
-            SEL="data/raob/latest_obs.csv"
-          fi
-
-          if [ -n "${SEL}" ] && [ -f "${SEL}" ]; then
-            echo "OBS_IN=${SEL}" >> $GITHUB_ENV
-            echo "Selected OBS_IN=${SEL}"
-          else
-            echo "OBS_IN=" >> $GITHUB_ENV
-            echo "Selected OBS_IN=<none>"
-            echo "NOTE: No dedicated obs_latest.(json|csv) file exists; RAOB obs pipeline is not updating."
-          fi
-
-      # --- ADDITION #2: pass --in explicitly (and pass the GFS speed tif explicitly) ---
-      - name: Build RAOB 250mb dataset (apples-to-apples)
+      - name: Build RAOB 250mb dataset (Merged)
         env:
           VALID_UTC: ${{ env.VALID_UTC }}
-          OBS_IN: ${{ env.OBS_IN }}
         run: |
           set -e
-          if [ -z "${OBS_IN}" ] || [ ! -f "${OBS_IN}" ]; then
-            echo "ERROR: No RAOB obs input file found. See the previous Debug step output."
+          # Explicitly pointing to the output of fetch_live_raob.py
+          OBS_IN="data/raob/obs_latest.csv"
+
+          if [ ! -f "${OBS_IN}" ]; then
+            echo "ERROR: fetch_live_raob.py failed to produce output."
             exit 2
           fi
 
+          # This script now merges GFS data into latest.json without deleting other models
           python scripts/build_raob_250mb_dataset.py \
             --in "${OBS_IN}" \
             --gfs-tif output_250mb_speed.tif \
@@ -244,6 +213,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # Add the fetched obs and the updated JSON
           git add tiles/250mb/latest tiles/250mb/latest/last_update.txt data/raob/latest.json || true
+          
           git commit -m "Update GFS 250mb tiles + RAOB dataset ($VALID_UTC)" || echo "No changes"
           git push
