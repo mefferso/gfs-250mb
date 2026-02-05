@@ -201,7 +201,6 @@ jobs:
           echo "=== find obs-like files under data/ (maxdepth 4) ==="
           find data -maxdepth 4 -type f \( -iname "*obs*.json" -o -iname "*obs*.csv" \) -print || true
 
-          # Priority order: dedicated obs files first
           SEL=""
           if [ -f data/raob/obs_latest.json ]; then
             SEL="data/raob/obs_latest.json"
@@ -211,19 +210,13 @@ jobs:
             SEL="data/raob/latest_obs.csv"
           fi
 
-          # Fallback: use latest.json as obs input if nothing else exists
-          if [ -z "${SEL}" ] && [ -f data/raob/latest.json ]; then
-            echo "No dedicated obs_latest.* found; using data/raob/latest.json as obs input"
-            SEL="data/raob/latest.json"
-          fi
-
           if [ -n "${SEL}" ] && [ -f "${SEL}" ]; then
             echo "OBS_IN=${SEL}" >> $GITHUB_ENV
             echo "Selected OBS_IN=${SEL}"
           else
             echo "OBS_IN=" >> $GITHUB_ENV
             echo "Selected OBS_IN=<none>"
-            echo "NOTE: No obs input file exists in the repo yet. Add a step to fetch/build obs into data/raob/obs_latest.(json|csv)."
+            echo "NOTE: No dedicated obs_latest.(json|csv) file exists; RAOB obs pipeline is not updating."
           fi
 
       # --- ADDITION #2: pass --in explicitly (and pass the GFS speed tif explicitly) ---
@@ -240,7 +233,7 @@ jobs:
 
           python scripts/build_raob_250mb_dataset.py \
             --in "${OBS_IN}" \
-            --gfs-tif output_250mb_speed.tif \
+            --gfs-tif "" \
             --gfs-units kt
 
       - name: Commit updated tiles and RAOB data
