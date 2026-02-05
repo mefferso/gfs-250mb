@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -215,14 +219,40 @@ jobs:
             --gfs-tif output_250mb_speed.tif \
             --gfs-units kt
 
-      - name: Commit updated tiles and RAOB data
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+    - name: Commit updated tiles and RAOB data
+  shell: bash
+  run: |
+    set -euo pipefail
 
-          git add tiles/250mb/latest tiles/250mb/latest/last_update.txt data/raob/latest.json || true
-          
-          git commit -m "Update GFS 250mb tiles + RAOB dataset ($VALID_UTC)" || echo "No changes"
-          git push
+    git config user.name "github-actions[bot]"
+    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+    # Make sure we're on latest main BEFORE staging anything
+    git fetch origin main
+    git checkout main
+    git pull --rebase origin main
+
+    # Stage whatever your workflow generates (adjust paths ONLY if your repo differs)
+    git add tiles/250mb/latest data/raob || true
+
+    # If nothing changed, bail cleanly
+    if git diff --cached --quiet; then
+      echo "No changes to commit."
+      exit 0
+    fi
+
+    git commit -m "Update GFS 250mb tiles + RAOB dataset ($(date -u +%Y%m%d%H%M))"
+
+    # Push with rebase+retry to handle the case main advanced mid-run
+    for attempt in 1 2 3; do
+      if git push origin main; then
+        echo "Push succeeded."
+        exit 0
+      fi
+      echo "Push rejected (non-fast-forward). Rebasing and retrying... attempt ${attempt}"
+      git fetch origin main
+      git pull --rebase origin main
+    done
+
+    echo "ERROR: push failed after retries."
+    exit 1
