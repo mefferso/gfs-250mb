@@ -2,15 +2,15 @@ name: Build GFS 250mb Wind Tiles
 
 on:
   workflow_dispatch:
-  schedule: 
-    - cron: '0 */6 * * *'
-
-permissions:
-  contents: write
+  schedule:
+    - cron: "0 */6 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -30,7 +30,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install Python dependencies
         run: |
@@ -154,20 +154,14 @@ jobs:
 
           # Color ramp
           vmin, vmax = 20.0, 225.0
-          
-          # Fix: Use 'speed.values' here, NOT 'speed_clip.values'
           data = np.clip(speed.values, vmin, vmax)
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
-          
-          # --- CUSTOM COLORMAP: Turbo -> White ---
+
           turbo = plt.get_cmap("turbo")
-          # Get standard turbo colors
           colors = turbo(np.linspace(0, 1, 255))
-          # Add pure white to the very end
           white = np.array([[1, 1, 1, 1]])
           new_colors = np.vstack((colors, white))
           cmap = mcolors.LinearSegmentedColormap.from_list("TurboWhite", new_colors)
-          # ---------------------------------------
 
           rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
 
@@ -219,40 +213,32 @@ jobs:
             --gfs-tif output_250mb_speed.tif \
             --gfs-units kt
 
-    - name: Commit updated tiles and RAOB data
-  shell: bash
-  run: |
-    set -euo pipefail
+      - name: Commit updated tiles and RAOB data
+        shell: bash
+        run: |
+          set -euo pipefail
 
-    git config user.name "github-actions[bot]"
-    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-    # Make sure we're on latest main BEFORE staging anything
-    git fetch origin main
-    git checkout main
-    git pull --rebase origin main
+          git add tiles/250mb/latest tiles/250mb/latest/last_update.txt data/raob/latest.json || true
 
-    # Stage whatever your workflow generates (adjust paths ONLY if your repo differs)
-    git add tiles/250mb/latest data/raob || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
 
-    # If nothing changed, bail cleanly
-    if git diff --cached --quiet; then
-      echo "No changes to commit."
-      exit 0
-    fi
+          git commit -m "Update GFS 250mb tiles + RAOB dataset (${VALID_UTC:-unknown})"
 
-    git commit -m "Update GFS 250mb tiles + RAOB dataset ($(date -u +%Y%m%d%H%M))"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "Push succeeded."
+              exit 0
+            fi
+            echo "Push rejected (non-fast-forward). Rebasing and retrying... attempt ${attempt}"
+            git fetch origin main
+            git pull --rebase origin main
+          done
 
-    # Push with rebase+retry to handle the case main advanced mid-run
-    for attempt in 1 2 3; do
-      if git push origin main; then
-        echo "Push succeeded."
-        exit 0
-      fi
-      echo "Push rejected (non-fast-forward). Rebasing and retrying... attempt ${attempt}"
-      git fetch origin main
-      git pull --rebase origin main
-    done
-
-    echo "ERROR: push failed after retries."
-    exit 1
+          echo "ERROR: push failed after retries."
+          exit 1
