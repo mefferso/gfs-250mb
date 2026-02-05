@@ -4,7 +4,7 @@ scripts/fetch_live_raob.py
 
 Fetches 00Z/12Z RAOB 250mb wind data directly from the University of Wyoming.
 - Loads station list from stations/*.csv
-- Determines correct Wyoming region (naconf, europe, seasia, etc) based on Lat/Lon.
+- Determines correct Wyoming region based on Lat/Lon.
 - Scrapes weather.uwyo.edu in parallel.
 
 Outputs: data/raob/obs_latest.csv
@@ -19,8 +19,36 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- CONFIGURATION ---
-WORKER_COUNT = 10  # Number of parallel requests to Wyoming
-TIMEOUT_SEC = 20   # Timeout per request
+WORKER_COUNT = 10
+TIMEOUT_SEC = 20
+
+
+def _norm_header(h: str) -> str:
+    """
+    Normalize header names so:
+      'Location Name' == 'LOCATION NAME' == 'location_name'
+    """
+    if h is None:
+        return ""
+    h = h.replace("\ufeff", "")          # BOM safety
+    h = h.strip()
+    h = h.replace("_", " ")
+    h = re.sub(r"\s+", " ", h)           # collapse whitespace
+    return h.upper()
+
+
+def build_field_map(fieldnames):
+    """
+    Returns dict: NORMALIZED_HEADER -> original header
+    """
+    if not fieldnames:
+        return {}
+    fm = {}
+    for fn in fieldnames:
+        key = _norm_header(fn)
+        if key and key not in fm:
+            fm[key] = fn
+    return fm
 
 
 def load_stations():
@@ -28,8 +56,8 @@ def load_stations():
     Loads all stations from CSVs in the stations/ folder.
     Returns list of dicts: [{'id': '72250', 'lat': 25.9, 'lon': -97.4, 'name': '...'}, ...]
     """
-
     stations = []
+
     station_dir = Path("stations")
     if not station_dir.exists():
         station_dir = Path("../stations")
@@ -43,63 +71,68 @@ def load_stations():
 
     unique_ids = set()
 
-    # Helper to normalize header names
-    def build_field_map(fieldnames):
-        """
-        Returns a dict mapping UPPER-CASED header -> original header string.
-        """
-        if not fieldnames:
-            return {}
-        return {fn.strip().upper(): fn for fn in fieldnames}
+    # Keys we’ll accept for each field
+    id_candidates = [
+        "STAT", "ID", "STATION", "WMO",
+        "STATION ID", "STATION_ID",
+        "ICAO", "ICAO ID", "ICAO_ID",
+        "RAOB ID", "RAOB_ID",
+        "IDENTIFIER",                 # <-- your column
+    ]
+    lat_candidates = ["LAT", "LATITUDE", "Y", "LAT DEG", "LAT_DEG", "LAT DEGREES", "LAT_DEGREES"]
+    lon_candidates = ["LON", "LONGITUDE", "X", "LON DEG", "LON_DEG", "LON DEGREES", "LON_DEGREES"]
+    name_candidates = [
+        "NAME", "STATION NAME", "CITY", "DESCRIPTION",
+        "LOCATION NAME",              # <-- your column
+        "LOCATION_NAME",
+    ]
 
-        for csv_file in csv_files:
+    def get_val(row, field_map, candidates):
+        for c in candidates:
+            c_norm = _norm_header(c)
+            if c_norm in field_map:
+                raw_key = field_map[c_norm]
+                val = row.get(raw_key)
+                if val is not None:
+                    val = str(val).strip()
+                    if val != "":
+                        return val
+        return None
+
+    for csv_file in csv_files:
         try:
             with open(csv_file, "r", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
                 field_map = build_field_map(reader.fieldnames)
 
-                print(f"  -> {csv_file.name} headers: {list(field_map.keys())}")
-
-                # Keys we’ll accept for each field
-                id_candidates = [
-                    "STAT", "ID", "STATION", "WMO",
-                    "STATION_ID", "ICAO", "ICAO_ID", "RAOB_ID",
-                    "IDENTIFIER"           # <-- your column
-                ]
-                lat_candidates = [
-                    "LAT", "LATITUDE", "Y", "LAT_DEG", "LAT_DEGREES"
-                ]
-                lon_candidates = [
-                    "LON", "LONGITUDE", "X", "LON_DEG", "LON_DEGREES"
-                ]
-                name_candidates = [
-                    "NAME", "STATION NAME", "CITY", "DESCRIPTION",
-                    "LOCATION NAME"        # <-- your column
-                ]
-
-                def get_val(row, candidates):
-                    for c in candidates:
-                        if c in field_map:
-                            raw_key = field_map[c]
-                            val = row.get(raw_key)
-                            if val not in (None, ""):
-                                return val
-                    return None
+                print(f"  -> {csv_file.name} headers(norm): {list(field_map.keys())}")
 
                 loaded_from_this_file = 0
+                total_rows = 0
+                missing_id = 0
+                missing_lat = 0
+                missing_lon = 0
+                bad_float = 0
 
                 for row in reader:
-                    sid = get_val(row, id_candidates)
-                    lat = get_val(row, lat_candidates)
-                    lon = get_val(row, lon_candidates)
-                    name = get_val(row, name_candidates) or sid
+                    total_rows += 1
 
-                    if not (sid and lat and lon):
-                        # Row missing something critical; skip
+                    sid = get_val(row, field_map, id_candidates)
+                    lat = get_val(row, field_map, lat_candidates)
+                    lon = get_val(row, field_map, lon_candidates)
+                    name = get_val(row, field_map, name_candidates) or sid
+
+                    if not sid:
+                        missing_id += 1
+                        continue
+                    if not lat:
+                        missing_lat += 1
+                        continue
+                    if not lon:
+                        missing_lon += 1
                         continue
 
                     clean_id = sid.strip().upper()
-
                     if clean_id in unique_ids:
                         continue
 
@@ -107,21 +140,14 @@ def load_stations():
                         lat_f = float(lat)
                         lon_f = float(lon)
                     except ValueError:
-                        # Bad numeric; skip this row
+                        bad_float += 1
                         continue
 
-                    stations.append(
-                        {
-                            "id": clean_id,
-                            "lat": lat_f,
-                            "lon": lon_f,
-                            "name": name,
-                        }
-                    )
+                    stations.append({"id": clean_id, "lat": lat_f, "lon": lon_f, "name": name})
                     unique_ids.add(clean_id)
                     loaded_from_this_file += 1
 
-                print(f"    Loaded {loaded_from_this_file} stations from {csv_file.name}")
+                print(f"    Rows={total_rows} | loaded={loaded_from_this_file} | missing_id={missing_id} | missing_lat={missing_lat} | missing_lon={missing_lon} | bad_float={bad_float}")
 
         except Exception as e:
             print(f"Skipping {csv_file.name}: {e}")
@@ -131,13 +157,9 @@ def load_stations():
 
 
 def get_wyoming_region(lat, lon):
-    """
-    Maps Lat/Lon to Wyoming website region codes.
-    """
     if lat < -60:
         return "ant"
     if lat > 70:
-        # Overlap with europe/naconf, but arctic is safer for polar
         return "arctic"
 
     # North America
@@ -148,7 +170,7 @@ def get_wyoming_region(lat, lon):
     if lat <= 5 and -95 <= lon <= -25:
         return "samer"
 
-    # Europe (Wide box)
+    # Europe
     if lat > 30 and -25 <= lon <= 45:
         return "europe"
 
@@ -157,7 +179,6 @@ def get_wyoming_region(lat, lon):
         return "africa"
 
     # SE Asia / Australia / India
-    # Wyoming 'seasia' map covers India through Australia
     if -50 <= lat <= 60 and 60 <= lon <= 180:
         return "seasia"
 
@@ -165,51 +186,29 @@ def get_wyoming_region(lat, lon):
     if 10 <= lat <= 60 and 30 <= lon <= 65:
         return "mideast"
 
-    # Pacific (fallback)
     return "pac"
 
 
 def get_target_cycle():
-    """
-    Returns a list of candidate datetimes to try (most recent first).
-    """
     now = datetime.datetime.utcnow()
     candidates = []
 
-    # Prioritize 12Z today if past 13:30Z
     if now.hour >= 13:
         candidates.append(now.replace(hour=12, minute=0, second=0, microsecond=0))
-    # 00Z today
     if now.hour >= 1:
         candidates.append(now.replace(hour=0, minute=0, second=0, microsecond=0))
-    # 12Z yesterday
-    candidates.append(
-        (now - datetime.timedelta(days=1)).replace(
-            hour=12, minute=0, second=0, microsecond=0
-        )
-    )
-    # 00Z yesterday
-    candidates.append(
-        (now - datetime.timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-    )
+
+    candidates.append((now - datetime.timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0))
+    candidates.append((now - datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
 
     return candidates
 
 
 def fetch_station(station, target_dt):
-    """
-    Worker function to fetch a single station from Wyoming.
-    """
     region = get_wyoming_region(station["lat"], station["lon"])
-
-    # Params for Wyoming
     year = target_dt.strftime("%Y")
     month = target_dt.strftime("%m")
-    # FROM/TO format is DDHH (e.g. 0500 or 0512)
     ddhh = target_dt.strftime("%d%H")
-    stnm = station["id"]
 
     url = "http://weather.uwyo.edu/cgi-bin/sounding"
     params = {
@@ -219,49 +218,40 @@ def fetch_station(station, target_dt):
         "MONTH": month,
         "FROM": ddhh,
         "TO": ddhh,
-        "STNM": stnm,
+        "STNM": station["id"],
     }
 
     try:
-        # Wyoming often slow, short timeout to fail fast
         r = requests.get(url, params=params, timeout=TIMEOUT_SEC)
         if r.status_code != 200:
             return None
 
         text = r.text
-
-        # Parse HTML for 250mb
-        # Look for lines starting with '  250.0'
-        # Wyoming Columns: PRES HGHT TEMP DWPT RELH MIXR DRCT SKNT
-        #   250.0 10240  -56.9  -68.9   34   0.03  265  105
         match = re.search(r"^\s*250\.0\s+.*", text, re.MULTILINE)
-        if match:
-            line = match.group(0)
-            parts = line.split()
-            # Parts: [250.0, HGHT, TEMP, DWPT, RELH, MIXR, DRCT, SKNT, ...]
-            if len(parts) >= 8:
-                try:
-                    sknt = float(parts[7])
-                    return {
-                        "station": stnm,
-                        "name": station["name"],
-                        "lat": station["lat"],
-                        "lon": station["lon"],
-                        "obs": sknt,
-                        "valid_utc": target_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    }
-                except ValueError:
-                    return None
+        if not match:
+            return None
+
+        parts = match.group(0).split()
+        if len(parts) < 8:
+            return None
+
+        sknt = float(parts[7])
+        return {
+            "station": station["id"],
+            "name": station["name"],
+            "lat": station["lat"],
+            "lon": station["lon"],
+            "obs": sknt,
+            "valid_utc": target_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
     except Exception:
         return None
-
-    return None
 
 
 def main():
     stations = load_stations()
     if not stations:
-        print("ERROR: No stations loaded from CSVs. Check header names (ID/LAT/LON).")
+        print("ERROR: No stations loaded from CSVs. This is a header/format problem.")
         sys.exit(1)
 
     cycles = get_target_cycle()
@@ -269,31 +259,25 @@ def main():
     final_obs = []
     chosen_cycle = None
 
-    # Try cycles until we get a "good" batch (>20 obs)
     for cycle in cycles:
         print(f"\n--- Attempting Cycle: {cycle} ---")
         obs_list = []
 
-        with ThreadPoolExecutor(max_workers=WORKER_COUNT) as executor:
-            future_to_station = {
-                executor.submit(fetch_station, s, cycle): s for s in stations
-            }
+        with ThreadPoolExecutor(max_workers=WORKER_COUNT) as ex:
+            futures = [ex.submit(fetch_station, s, cycle) for s in stations]
 
-            completed = 0
-            total = len(stations)
-
-            for future in as_completed(future_to_station):
-                completed += 1
-                if completed % 50 == 0:
-                    print(f"Progress: {completed}/{total} stations checked...")
-
-                res = future.result()
+            done = 0
+            for fut in as_completed(futures):
+                done += 1
+                if done % 50 == 0:
+                    print(f"Progress: {done}/{len(stations)} checked...")
+                res = fut.result()
                 if res:
                     obs_list.append(res)
 
         print(f"Cycle {cycle}: Retrieved {len(obs_list)} observations.")
 
-        if len(obs_list) > 20:  # Threshold for success
+        if len(obs_list) > 20:
             final_obs = obs_list
             chosen_cycle = cycle
             break
@@ -311,12 +295,12 @@ def main():
     print(f"\nUsing cycle {chosen_cycle} — writing {len(final_obs)} rows to {out_file}...")
     with open(out_file, "w", newline="", encoding="utf-8") as f:
         fieldnames = ["station", "name", "lat", "lon", "obs", "valid_utc"]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
         for row in final_obs:
-            writer.writerow(row)
+            w.writerow(row)
 
-    print(f"Success. OBS_IN={out_file}")
+    print("Success.")
 
 
 if __name__ == "__main__":
