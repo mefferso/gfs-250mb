@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gdal-bin
-          pip install numpy xarray cfgrib eccodes rasterio matplotlib ecmwf-opendata
+          pip install numpy xarray cfgrib eccodes rasterio matplotlib ecmwf-opendata requests pandas
 
       - name: Download latest ECMWF (High Res)
         run: |
@@ -67,7 +67,7 @@ jobs:
               exit(1)
           EOF
 
-      - name: Generate COLOR 250mb wind GeoTIFF
+      - name: Generate Speed GeoTIFFs (Raw + Color)
         run: |
           python << 'EOF'
           import xarray as xr
@@ -104,7 +104,22 @@ jobs:
           dx = float(abs(lons_clip[1] - lons_clip[0]))
           transform = from_origin(float(lons_clip.min()), float(lats_clip.max()), dx, dy)
 
-          # Color ramp
+          # --- 1. WRITE RAW SPEED (Floating Point for Data Sampling) ---
+          with rasterio.open(
+              "output_250mb_speed.tif",
+              "w",
+              driver="GTiff",
+              height=speed_clip.shape[0],
+              width=speed_clip.shape[1],
+              count=1,
+              dtype="float32",
+              crs="EPSG:4326",
+              transform=transform,
+              nodata=np.nan,
+          ) as dst:
+              dst.write(speed_clip.values.astype("float32"), 1)
+
+          # --- 2. WRITE COLOR TILES (RGB for Map) ---
           vmin, vmax = 20.0, 225.0
           data = np.clip(speed_clip.values, vmin, vmax)
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
@@ -115,7 +130,7 @@ jobs:
               dst.write(rgb[:, :, 0], 1)
               dst.write(rgb[:, :, 1], 2)
               dst.write(rgb[:, :, 2], 3)
-          print("GeoTIFF written successfully")
+          print("GeoTIFFs written successfully")
           EOF
 
       - name: Generate map tiles (zoom 0-4)
@@ -124,13 +139,31 @@ jobs:
           mkdir -p tiles/ecmwf/latest
           gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 output_250mb_color.tif tiles/ecmwf/latest
 
+      - name: Update Dataset (Fill ECMWF Data)
+        run: |
+          set -e
+          # We use latest.json as INPUT to preserve GFS/Obs data
+          # We use output_250mb_speed.tif (raw data) to sample winds
+          
+          if [ -f "data/raob/latest.json" ]; then
+            python scripts/build_raob_250mb_dataset.py \
+              --in "data/raob/latest.json" \
+              --out "data/raob/latest.json" \
+              --ecmwf-tif output_250mb_speed.tif \
+              --ecmwf-units kt
+          else
+            echo "Warning: latest.json not found. Skipping data merge."
+          fi
+
       - name: Commit updated tiles
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add tiles/ecmwf/latest || true
-          git commit -m "Update ECMWF 250mb tiles" || echo "No changes to commit"
-          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}
+          
+          # Add tiles AND the updated JSON
+          git add tiles/ecmwf/latest data/raob/latest.json || true
+          
+          git commit -m "Update ECMWF 250mb tiles + Data" || echo "No changes to commit"
           git push
