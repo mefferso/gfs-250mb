@@ -293,11 +293,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          # 1. Configure Git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 1. Stage and Commit local changes FIRST to avoid dirty tree errors
+          # 2. Stage and Commit local changes FIRST
+          # We commit before pulling to ensure our new tiles are safely stored in a commit.
           git add tiles/ecmwf/latest tiles/ecmwf/latest/last_update.txt data/raob/latest.json || true
+          
+          # Debug: check what is staged
+          git status
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
@@ -306,18 +311,17 @@ jobs:
 
           git commit -m "Update ECMWF 250mb tiles + dataset (${ECMWF_VALID_UTC:-unknown})"
 
-          # 2. Fetch and Rebase onto origin/main
-          # This handles updates from other workflows without erroring on dirty working tree
+          # 3. Fetch and Rebase onto origin/main
+          # This incorporates any changes from the repo (like GFS updates) onto our new commit
           git fetch origin main
           git rebase origin/main
 
-          # 3. Push
+          # 4. Push with retry logic
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "Push succeeded."
               exit 0
             fi
-            # If race condition, rebase again
             echo "Push rejected. Rebasing and retrying... attempt ${attempt}"
             git fetch origin main
             git rebase origin/main
