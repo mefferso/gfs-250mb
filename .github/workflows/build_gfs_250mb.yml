@@ -1,9 +1,9 @@
 name: Build GFS 250mb Wind Tiles
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "15 */6 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -34,63 +34,105 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install numpy xarray cfgrib eccodes rasterio matplotlib requests pandas
+          pip install numpy xarray[complete] rasterio matplotlib requests pandas
 
-      - name: Download latest available GFS f000 (00Z/12Z) + set VALID_UTC
+      - name: Download GFS 250mb U/V (0.25 deg)
         run: |
           set -e
           mkdir -p data
 
-          try_fetch () {
-            local ymd="$1"
-            local cyc="$2"
-            local url="https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.${ymd}/${cyc}/atmos/gfs.t${cyc}z.pgrb2.0p25.f000"
-            echo "Trying ${ymd} ${cyc}Z -> ${url}"
+          # We'll run a Python script to fetch the latest GFS cycle
+          python3 << 'EOF'
+          import requests
+          from datetime import datetime, timedelta
+          import os
 
-            if curl -fsSL --max-time 120 -o data/gfs.grib2 "${url}"; then
-              local sz
-              sz=$(stat -c%s data/gfs.grib2 || echo 0)
-              if [ "${sz}" -gt 2000000 ]; then
-                echo "Downloaded OK (${sz} bytes)"
-                echo "VALID_UTC=${ymd}${cyc}" >> $GITHUB_ENV
-                return 0
-              else
-                echo "Downloaded file too small (${sz}) - treating as failure"
-              fi
-            fi
+          # We want 00z, 06z, 12z, 18z. 
+          # We'll try "today" and "yesterday" cycles until we find one that has the file.
+          
+          base_url = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
+          
+          # Adjust "now" slightly back to ensure we don't look for a future cycle
+          now = datetime.utcnow()
+          
+          # Candidates: (date, hour)
+          candidates = []
+          for d_offset in [0, 1]:
+              d = now - timedelta(days=d_offset)
+              for h in [18, 12, 6, 0]:
+                  candidates.append((d, h))
 
-            rm -f data/gfs.grib2
-            return 1
-          }
+          out_path = "data/gfs_250mb.grib2"
+          env_path = os.environ.get("GITHUB_ENV")
 
-          NOW_H=$(date -u +"%H")
-          TODAY=$(date -u +"%Y%m%d")
-          YDAY=$(date -u -d "yesterday" +"%Y%m%d")
+          found = False
+          chosen_cycle = ""
 
-          if [ "${NOW_H}" -ge 18 ]; then
-            CANDIDATES="${TODAY}:12 ${TODAY}:00 ${YDAY}:12 ${YDAY}:00"
-          elif [ "${NOW_H}" -ge 6 ]; then
-            CANDIDATES="${TODAY}:00 ${YDAY}:12 ${YDAY}:00"
-          else
-            CANDIDATES="${YDAY}:12 ${YDAY}:00"
-          fi
+          for (dt, hour) in candidates:
+              date_str = dt.strftime("%Y%m%d")
+              cycle_str = f"{hour:02d}"
+              
+              # Construct URL parameters
+              # file=gfs.tCCz.pgrb2.0p25.f000
+              # lev_250_mb=on
+              # var_UGRD=on, var_VGRD=on
+              # dir=%2Fgfs.YYYYMMDD%2FCC%2Fatmos
+              
+              params = {
+                  "file": f"gfs.t{cycle_str}z.pgrb2.0p25.f000",
+                  "lev_250_mb": "on",
+                  "var_UGRD": "on",
+                  "var_VGRD": "on",
+                  "dir": f"/gfs.{date_str}/{cycle_str}/atmos"
+              }
+              
+              try:
+                  print(f"Checking GFS {date_str} {cycle_str}z ...")
+                  r = requests.get(base_url, params=params, stream=True, timeout=10)
+                  
+                  if r.status_code == 200:
+                      # Check content type or size if possible, but status 200 usually means OK for filter script
+                      # Nomads returns 200 with text "No files found" sometimes, so we check content.
+                      
+                      # Consume a chunk to see if it's text error
+                      chunk = next(r.iter_content(chunk_size=1024), b"")
+                      if b"No files" in chunk or b"Error" in chunk:
+                          print("  -> Nomads error message.")
+                          continue
+                      
+                      # If it looks like binary (GRIB starts with GRIB usually, but let's just save it)
+                      with open(out_path, 'wb') as f:
+                          f.write(chunk)
+                          for more in r.iter_content(chunk_size=8192):
+                              f.write(more)
+                      
+                      # Verify size > 100KB
+                      sz = os.path.getsize(out_path)
+                      print(f"  -> Downloaded {sz} bytes.")
+                      if sz < 100_000:
+                          print("  -> Too small, skipping.")
+                          continue
+                          
+                      found = True
+                      chosen_cycle = f"{date_str}{cycle_str}"
+                      print(f"SUCCESS: Got GFS {chosen_cycle}")
+                      break
+                  else:
+                      print(f"  -> HTTP {r.status_code}")
+              except Exception as e:
+                  print(f"  -> Exception: {e}")
 
-          for pair in ${CANDIDATES}; do
-            ymd="${pair%%:*}"
-            cyc="${pair##*:}"
-            if try_fetch "${ymd}" "${cyc}"; then
-              break
-            fi
-          done
+          if not found:
+              print("ERROR: Could not download any GFS cycle.")
+              exit(1)
 
-          if [ ! -f data/gfs.grib2 ]; then
-            echo "ERROR: Could not download any candidate GFS f000 GRIB2."
-            exit 2
-          fi
+          # Write env var for next steps
+          if env_path:
+              with open(env_path, "a") as f:
+                  f.write(f"GFS_VALID_UTC={chosen_cycle}\n")
+          EOF
 
-          echo "Using VALID_UTC=${VALID_UTC}"
-
-      - name: Generate COLOR 250mb wind GeoTIFF
+      - name: Generate GFS 250mb GeoTIFFs (Raw + Color)
         run: |
           python << 'EOF'
           import xarray as xr
@@ -101,119 +143,178 @@ jobs:
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
           import matplotlib.colors as mcolors
+          import os
 
-          WEBMERC_MAXLAT = 85.0511
+          # Web Mercator limits (approx 85 deg N/S)
+          WEBMERC_MAXLAT = 85.05112878
 
-          ds_u = xr.open_dataset(
-              "data/gfs.grib2",
-              engine="cfgrib",
-              backend_kwargs={
-                  "filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "u"},
-                  "indexpath": ""
-              },
-          )
-          ds_v = xr.open_dataset(
-              "data/gfs.grib2",
-              engine="cfgrib",
-              backend_kwargs={
-                  "filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "v"},
-                  "indexpath": ""
-              },
-          )
+          if not os.path.exists("data/gfs_250mb.grib2"):
+              raise SystemExit("ERROR: data/gfs_250mb.grib2 not found.")
 
-          u = ds_u["u"].sel(isobaricInhPa=250)
-          v = ds_v["v"].sel(isobaricInhPa=250)
+          # Open GRIB with xarray (cfgrib engine)
+          # We filter for 250mb U and V
+          # Note: cfgrib might see them as 'u' and 'v' or 'u2'/'v2' if multiple steps.
+          # Here we fetched only f000 so should be simple.
+          
+          try:
+            ds = xr.open_dataset("data/gfs_250mb.grib2", engine="cfgrib", 
+                                 backend_kwargs={'filter_by_keys': {'typeOfLevel': 'isobaricInhPa', 'level': 250}})
+          except Exception:
+             # Fallback if keys differ
+             ds = xr.open_dataset("data/gfs_250mb.grib2", engine="cfgrib")
 
+          # We expect variables 'u' and 'v' (or 'gh' etc). Let's find u/v.
+          # Usually shortName is 'u' / 'v'.
+          
+          u = ds['u']
+          v = ds['v']
+          
+          # Calculate Speed (m/s -> knots)
+          # 1 m/s = 1.94384 kt
           speed = np.sqrt(u**2 + v**2) * 1.94384
-          speed = speed.assign_coords(
-              longitude=(((speed.longitude + 180) % 360) - 180)
-          ).sortby("longitude").sortby("latitude", ascending=False)
+          
+          # GFS is 0..360 longitude. We need -180..180 for standard web maps, usually.
+          # Or we can keep 0..360 but let's normalize to standard WGS84 -180..180 for Rasterio.
+          
+          speed = speed.assign_coords(longitude=(((speed.longitude + 180) % 360) - 180))
+          speed = speed.sortby("longitude")
+          
+          # Clip Latitude to WebMercator limits so gdal2tiles doesn't freak out
           speed = speed.sel(latitude=slice(WEBMERC_MAXLAT, -WEBMERC_MAXLAT))
-
+          
+          # Extract values and geo-transform info
+          # GFS is typically 0.25 deg resolution
           lats = speed.latitude.values
           lons = speed.longitude.values
-
+          
+          # Construct Affine Transform
+          # (min_lon, delta_lon, 0, max_lat, 0, delta_lat)
+          # Note: GFS lats are usually descending (90 -> -90). rasterio handles negative dy.
+          
           dx = float(abs(lons[1] - lons[0]))
           dy = float(abs(lats[1] - lats[0]))
+          
+          # West, North, x_res, y_res (negative for north-up usually? No, standard is positive dx, negative dy if top-left origin)
+          # from_origin(west, north, xsize, ysize)
           transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
 
-          # WRITE RAW SPEED (for sampling)
+          # 1. Write RAW Speed (Float32) for data picking
           with rasterio.open(
-              "output_250mb_speed.tif",
+              "gfs_output_250mb_speed.tif",
               "w",
               driver="GTiff",
               height=speed.shape[0],
               width=speed.shape[1],
               count=1,
-              dtype="float32",
+              dtype='float32',
               crs="EPSG:4326",
               transform=transform,
-              nodata=np.nan,
+              nodata=np.nan
           ) as dst:
-              dst.write(speed.values.astype("float32"), 1)
+              dst.write(speed.values.astype('float32'), 1)
 
-          # Color ramp
-          vmin, vmax = 20.0, 200.0
+          # 2. Write COLOR Speed (RGBA Uint8) for visualization
+          # Colormap: Turbo (similar to Windy) or Jet. Let's use Turbo.
+          # Range: 20 kt to 225 kt (Jetstream range)
+          
+          vmin, vmax = 20.0, 225.0
           data = np.clip(speed.values, vmin, vmax)
+          # Normalize 0..1
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
-
-          turbo = plt.get_cmap("turbo")
+          
+          # Apply Colormap
+          # turbo is available in recent matplotlib
+          turbo = plt.get_cmap('turbo')
+          # Create custom cmap with transparent for low values? 
+          # Or just solid. Let's make < 20kt transparent or white.
+          # Actually, let's keep it solid but use a colorbar.
+          
+          # Convert to RGBA
           colors = turbo(np.linspace(0, 1, 255))
-          white = np.array([[1, 1, 1, 1]])
-          new_colors = np.vstack((colors, white))
-          cmap = mcolors.LinearSegmentedColormap.from_list("TurboWhite", new_colors)
-
-          rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
-
+          # Prepend white/transparent for bottom?
+          white = np.array([[1, 1, 1, 1]]) # Opaque white for low wind
+          new_colors = np.vstack((colors, white)) # Actually usually we map values. 
+          
+          # Let's just map standard turbo.
+          # Apply to data
+          # (H, W, 4) -> (4, H, W)
+          
+          # Let's explicitly build RGBA buffer
+          # plt.cm.turbo(norm) returns float 0..1
+          rgba = turbo(norm)
+          
+          # Convert to uint8 0..255
+          rgba_u8 = (rgba * 255).astype('uint8')
+          
           with rasterio.open(
-              "output_250mb_color.tif",
+              "gfs_output_250mb_color.tif",
               "w",
               driver="GTiff",
-              height=rgb.shape[0],
-              width=rgb.shape[1],
-              count=3,
-              dtype="uint8",
+              height=rgba_u8.shape[0],
+              width=rgba_u8.shape[1],
+              count=3, # We'll just do RGB for tiles, or 4 for RGBA
+              dtype='uint8',
               crs="EPSG:4326",
-              transform=transform,
+              transform=transform
           ) as dst:
-              dst.write(rgb[:, :, 0], 1)
-              dst.write(rgb[:, :, 1], 2)
-              dst.write(rgb[:, :, 2], 3)
+              dst.write(rgba_u8[:, :, 0], 1) # R
+              dst.write(rgba_u8[:, :, 1], 2) # G
+              dst.write(rgba_u8[:, :, 2], 3) # B
+              # dst.write(rgba_u8[:, :, 3], 4) # A
 
-          print("GeoTIFFs written successfully")
+          print("GeoTIFFs written successfully.")
           EOF
 
       - name: Generate map tiles (zoom 0-4)
         run: |
+          # Clean old tiles
           rm -rf tiles/250mb/latest
           mkdir -p tiles/250mb/latest
+          
+          # Use gdal2tiles to generate XYZ folder structure
+          # -r bilinear for smoother look, -z 0-4 for low zoom global view
           gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 \
-            output_250mb_color.tif tiles/250mb/latest
+            gfs_output_250mb_color.tif tiles/250mb/latest
+            
+          # Timestamp
           date > tiles/250mb/latest/last_update.txt
 
-      - name: Fetch Live RAOB Data
-        run: |
-          echo "Fetching latest RAOBs..."
-          python scripts/fetch_live_raob.py
-
-      - name: Build RAOB 250mb dataset (Merged)
-        env:
-          VALID_UTC: ${{ env.VALID_UTC }}
+      - name: Update Dataset (Fill GFS Data)
         run: |
           set -e
-          OBS_IN="data/raob/obs_latest.csv"
-
-          if [ ! -f "${OBS_IN}" ]; then
-            echo "ERROR: fetch_live_raob.py failed to produce output."
-            exit 2
-          fi
-
+          # 1. Fetch live RAOBs first (creates data/raob/obs_latest.csv)
+          python scripts/fetch_live_raob.py
+          
+          # 2. Merge with GFS Tiff -> creates/updates data/raob/latest.json
           python scripts/build_raob_250mb_dataset.py \
-            --in "${OBS_IN}" \
-            --gfs-tif output_250mb_speed.tif \
-            --gfs-units kt
+             --in "data/raob/obs_latest.csv" \
+             --out "data/raob/latest.json" \
+             --gfs-tif gfs_output_250mb_speed.tif \
+             --gfs-units kt
 
-      - name: Commit updated tiles and RAOB data
+      # --- NEW STEP: Archive Data ---
+      - name: Archive Tiles and JSON
+        run: |
+          # 1. Get the cycle time
+          # If GFS_VALID_UTC is set, use it. Otherwise use current hour.
+          CYCLE="${GFS_VALID_UTC}"
+          if [ -z "$CYCLE" ]; then CYCLE=$(date -u +"%Y%m%d%H"); fi
+          
+          echo "Archiving for cycle: $CYCLE"
+          
+          # 2. Archive GFS Tiles
+          # GFS tiles are in tiles/250mb/latest
+          mkdir -p tiles/250mb/$CYCLE
+          cp -r tiles/250mb/latest/* tiles/250mb/$CYCLE/ || true
+
+          # 3. Archive JSON
+          mkdir -p data/history
+          cp data/raob/latest.json data/history/$CYCLE.json || true
+
+          # 4. Update Inventory & Cleanup
+          python scripts/update_inventory.py
+
+      - name: Commit updated GFS tiles + dataset
         shell: bash
         run: |
           set -euo pipefail
@@ -221,24 +322,32 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add tiles/250mb/latest tiles/250mb/latest/last_update.txt data/raob/latest.json || true
+          # Fetch latest to avoid conflicts
+          git fetch origin main
+          git checkout main
+          git pull --rebase origin main
+
+          # Add new tiles, JSON, history, and inventory
+          git add tiles/250mb/latest tiles/250mb/2* data/raob/latest.json data/history/ || true
+          
+          # Check status
+          git status
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "Update GFS 250mb tiles + RAOB dataset (${VALID_UTC:-unknown})"
+          git commit -m "Update GFS tiles + Archive ${GFS_VALID_UTC:-unknown}"
 
+          # Push with retry
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "Push succeeded."
               exit 0
             fi
-            echo "Push rejected (non-fast-forward). Rebasing and retrying... attempt ${attempt}"
+            echo "Push rejected. Rebasing..."
             git fetch origin main
             git pull --rebase origin main
           done
-
-          echo "ERROR: push failed after retries."
           exit 1
