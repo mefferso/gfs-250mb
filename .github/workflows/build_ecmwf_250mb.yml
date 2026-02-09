@@ -46,6 +46,7 @@ jobs:
           from datetime import datetime, timedelta
           import os
           import xarray as xr
+          import numpy as np
 
           client = Client()
 
@@ -54,22 +55,43 @@ jobs:
 
           def validate_grib(path: str) -> bool:
             try:
+              # Iterate to ensure both U and V components exist
               for sn in ("u", "v"):
+                # Open dataset filtering for the specific shortName
                 ds = xr.open_dataset(
                   path,
                   engine="cfgrib",
                   backend_kwargs={
-                    "filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": sn},
+                    "filter_by_keys": {"shortName": sn},
                     "indexpath": ""
                   },
                 )
+                
                 if sn not in ds:
+                  print(f"Validation Error: Variable '{sn}' not found in GRIB.")
                   return False
-                # must be able to select 250 hPa without error
-                _ = ds[sn].sel(isobaricInhPa=250)
+                
+                # Verify we have the 250mb level without triggering PandaIndex error
+                # If isobaricInhPa is missing, it might be a different level type, which is a fail.
+                if "isobaricInhPa" in ds.coords:
+                    lev = ds["isobaricInhPa"].values
+                    # Handle scalar (0-d array) which happens with single-level files
+                    if np.ndim(lev) == 0:
+                        val = float(lev)
+                    else:
+                        # If multiple levels exist (unlikely here), check if 250 is present
+                        val = 250.0 if 250 in lev else float(lev[0])
+                    
+                    if abs(val - 250.0) > 1.0:
+                        print(f"Validation Error: Expected level 250, found {val}")
+                        return False
+                else:
+                    print("Validation Error: Coordinate 'isobaricInhPa' not found.")
+                    return False
+
               return True
             except Exception as e:
-              print(f"Validation failed: {e}")
+              print(f"Validation crash: {e}")
               return False
 
           def attempt(date_str, hour):
@@ -77,17 +99,21 @@ jobs:
             if os.path.exists(out_path):
               os.remove(out_path)
 
-            client.retrieve(
-              date=date_str,
-              time=hour,
-              step=0,
-              type="fc",
-              levtype="pl",
-              levelist=250,
-              param=["u", "v"],
-              resol="0p25",
-              target=out_path
-            )
+            try:
+                client.retrieve(
+                  date=date_str,
+                  time=hour,
+                  step=0,
+                  type="fc",
+                  levtype="pl",
+                  levelist=250,
+                  param=["u", "v"],
+                  resol="0p25",
+                  target=out_path
+                )
+            except Exception as e:
+                print(f"Download API Error: {e}")
+                return False
 
             try:
               sz = os.path.getsize(out_path)
@@ -96,9 +122,9 @@ jobs:
 
             print(f"Downloaded size: {sz} bytes")
 
-            # ECMWF u/v @ 250mb can be ~1–2 MB. Size check is minimal; real check is cfgrib validation.
+            # Basic size check (approx 1MB for global 0.25deg U+V at one level)
             if sz < 200_000:
-              print("Too small; treating as failure.")
+              print("File too small; treating as failure.")
               return False
 
             if validate_grib(out_path):
@@ -109,7 +135,7 @@ jobs:
             return False
 
           # pick cycles (00/12) with a little lag for publishing
-          now = datetime.utcnow() - timedelta(hours=6)
+          now = datetime.utcnow() - timedelta(hours=5)
           today = now.strftime("%Y%m%d")
           yday = (now - timedelta(days=1)).strftime("%Y%m%d")
 
@@ -124,13 +150,10 @@ jobs:
           chosen = None
 
           for date_str, hour in candidates:
-            try:
-              if attempt(date_str, hour):
-                ok = True
-                chosen = f"{date_str}{hour:02d}"
-                break
-            except Exception as e:
-              print(f"Attempt failed: {e}")
+            if attempt(date_str, hour):
+              ok = True
+              chosen = f"{date_str}{hour:02d}"
+              break
 
           if not ok:
             raise SystemExit("ERROR: Could not download any candidate ECMWF cycle.")
@@ -160,11 +183,13 @@ jobs:
           if not os.path.exists("data/ecmwf.grib2"):
               raise SystemExit("ERROR: data/ecmwf.grib2 not found.")
 
+          # Load U and V
+          # Note: We use filter_by_keys because U and V are often in separate GRIB messages
           ds_u = xr.open_dataset(
               "data/ecmwf.grib2",
               engine="cfgrib",
               backend_kwargs={
-                  "filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "u"},
+                  "filter_by_keys": {"shortName": "u"},
                   "indexpath": ""
               },
           )
@@ -172,13 +197,14 @@ jobs:
               "data/ecmwf.grib2",
               engine="cfgrib",
               backend_kwargs={
-                  "filter_by_keys": {"typeOfLevel": "isobaricInhPa", "shortName": "v"},
+                  "filter_by_keys": {"shortName": "v"},
                   "indexpath": ""
               },
           )
 
-          u = ds_u["u"].sel(isobaricInhPa=250)
-          v = ds_v["v"].sel(isobaricInhPa=250)
+          # Extract data (handling scalar coordinate issue here too just in case)
+          u = ds_u["u"]
+          v = ds_v["v"]
 
           # m/s -> kt
           speed = np.sqrt(u**2 + v**2) * 1.94384
