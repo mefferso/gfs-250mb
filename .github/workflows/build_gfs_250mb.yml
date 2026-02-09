@@ -41,24 +41,24 @@ jobs:
           set -e
           mkdir -p data
 
-          # We'll run a Python script to fetch the latest GFS cycle
+          # switch to AWS Mirror for reliability
           python3 << 'EOF'
           import requests
           from datetime import datetime, timedelta
           import os
+          import sys
+
+          # AWS Mirror Pattern: 
+          # https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.YYYYMMDD/HH/atmos/gfs.tHHz.pgrb2.0p25.f000
 
           # We want 00z, 06z, 12z, 18z. 
-          # We'll try "today" and "yesterday" cycles until we find one that has the file.
-          
-          base_url = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
-          
-          # Adjust "now" slightly back to ensure we don't look for a future cycle
           now = datetime.utcnow()
           
-          # Candidates: (date, hour)
+          # Candidates: Check today and yesterday
           candidates = []
           for d_offset in [0, 1]:
               d = now - timedelta(days=d_offset)
+              # Check cycles in reverse order (latest first)
               for h in [18, 12, 6, 0]:
                   candidates.append((d, h))
 
@@ -72,66 +72,46 @@ jobs:
               date_str = dt.strftime("%Y%m%d")
               cycle_str = f"{hour:02d}"
               
-              # Construct URL parameters
-              # file=gfs.tCCz.pgrb2.0p25.f000
-              # lev_250_mb=on
-              # var_UGRD=on, var_VGRD=on
-              # dir=%2Fgfs.YYYYMMDD%2FCC%2Fatmos
+              # Construct AWS S3 URL
+              url = f"https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{date_str}/{cycle_str}/atmos/gfs.t{cycle_str}z.pgrb2.0p25.f000"
               
-              params = {
-                  "file": f"gfs.t{cycle_str}z.pgrb2.0p25.f000",
-                  "lev_250_mb": "on",
-                  "var_UGRD": "on",
-                  "var_VGRD": "on",
-                  "dir": f"/gfs.{date_str}/{cycle_str}/atmos"
-              }
+              print(f"Checking AWS S3: {date_str} {cycle_str}z ...")
               
               try:
-                  print(f"Checking GFS {date_str} {cycle_str}z ...")
-                  r = requests.get(base_url, params=params, stream=True, timeout=10)
-                  
-                  if r.status_code == 200:
-                      # Check content type or size if possible, but status 200 usually means OK for filter script
-                      # Nomads returns 200 with text "No files found" sometimes, so we check content.
-                      
-                      # Consume a chunk to see if it's text error
-                      chunk = next(r.iter_content(chunk_size=1024), b"")
-                      if b"No files" in chunk or b"Error" in chunk:
-                          print("  -> Nomads error message.")
-                          continue
-                      
-                      # If it looks like binary (GRIB starts with GRIB usually, but let's just save it)
-                      with open(out_path, 'wb') as f:
-                          f.write(chunk)
-                          for more in r.iter_content(chunk_size=8192):
-                              f.write(more)
-                      
-                      # Verify size > 100KB
-                      sz = os.path.getsize(out_path)
-                      print(f"  -> Downloaded {sz} bytes.")
-                      if sz < 100_000:
-                          print("  -> Too small, skipping.")
-                          continue
+                  # Stream the download
+                  with requests.get(url, stream=True, timeout=20) as r:
+                      if r.status_code == 200:
+                          print(f"  -> Found! Downloading...")
+                          with open(out_path, 'wb') as f:
+                              for chunk in r.iter_content(chunk_size=1024*1024): # 1MB chunks
+                                  if chunk:
+                                      f.write(chunk)
                           
-                      found = True
-                      chosen_cycle = f"{date_str}{cycle_str}"
-                      print(f"SUCCESS: Got GFS {chosen_cycle}")
-                      break
-                  else:
-                      print(f"  -> HTTP {r.status_code}")
+                          # Verify size (Full file is ~500MB, partial is invalid)
+                          sz = os.path.getsize(out_path)
+                          print(f"  -> Downloaded {sz / 1024 / 1024:.1f} MB")
+                          
+                          if sz > 10_000_000: # Ensure it's not a tiny error file
+                              found = True
+                              chosen_cycle = f"{date_str}{cycle_str}"
+                              print(f"SUCCESS: Got GFS {chosen_cycle}")
+                              break
+                          else:
+                              print("  -> File too small, likely invalid.")
+                      else:
+                          # 404 means this cycle hasn't uploaded to AWS yet
+                          print(f"  -> Not available (HTTP {r.status_code})")
               except Exception as e:
-                  print(f"  -> Exception: {e}")
+                  print(f"  -> Error: {e}")
 
           if not found:
-              print("ERROR: Could not download any GFS cycle.")
-              exit(1)
+              print("ERROR: Could not download any GFS cycle from AWS.")
+              sys.exit(1)
 
-          # Write env var for next steps
           if env_path:
               with open(env_path, "a") as f:
                   f.write(f"GFS_VALID_UTC={chosen_cycle}\n")
           EOF
-
       - name: Generate GFS 250mb GeoTIFFs (Raw + Color)
         run: |
           python << 'EOF'
