@@ -288,20 +288,41 @@ jobs:
             echo "WARNING: data/raob/latest.json not found. Skipping merge."
           fi
 
+     # ... (Existing steps for Generate Tiles and Update Dataset remain the same) ...
+
+      # --- NEW STEP: Archive Data ---
+      - name: Archive Tiles and JSON
+        run: |
+          # 1. Get the cycle time from the environment or generate one
+          # If ECMWF_VALID_UTC is set (e.g., 2026020912), use it. Otherwise use current hour.
+          CYCLE="${ECMWF_VALID_UTC}"
+          if [ -z "$CYCLE" ]; then CYCLE=$(date -u +"%Y%m%d%H"); fi
+          
+          echo "Archiving for cycle: $CYCLE"
+          
+          # 2. Archive Tiles
+          mkdir -p tiles/ecmwf/$CYCLE
+          # Copy contents of 'latest' to timestamped folder
+          cp -r tiles/ecmwf/latest/* tiles/ecmwf/$CYCLE/ || true
+
+          # 3. Archive JSON
+          mkdir -p data/history
+          cp data/raob/latest.json data/history/$CYCLE.json || true
+
+          # 4. Update Inventory & Cleanup
+          python scripts/update_inventory.py
+
       - name: Commit updated ECMWF tiles + dataset
         shell: bash
         run: |
           set -euo pipefail
-
-          # 1. Configure Git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 2. Stage and Commit local changes FIRST
-          # We commit before pulling to ensure our new tiles are safely stored in a commit.
-          git add tiles/ecmwf/latest tiles/ecmwf/latest/last_update.txt data/raob/latest.json || true
+          # Add inventory, history JSON, and new tile folder
+          git add tiles/ecmwf/latest tiles/ecmwf/2* data/raob/latest.json data/history/ || true
           
-          # Debug: check what is staged
+          # Debug
           git status
 
           if git diff --cached --quiet; then
@@ -309,23 +330,19 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Update ECMWF 250mb tiles + dataset (${ECMWF_VALID_UTC:-unknown})"
+          git commit -m "Update ECMWF tiles + Archive ${ECMWF_VALID_UTC:-unknown}"
 
-          # 3. Fetch and Rebase onto origin/main
-          # This incorporates any changes from the repo (like GFS updates) onto our new commit
           git fetch origin main
           git rebase origin/main
-
-          # 4. Push with retry logic
+          
+          # Push loop
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "Push succeeded."
               exit 0
             fi
-            echo "Push rejected. Rebasing and retrying... attempt ${attempt}"
+            echo "Push rejected. Rebasing..."
             git fetch origin main
             git rebase origin/main
           done
-
-          echo "ERROR: push failed after retries."
           exit 1
