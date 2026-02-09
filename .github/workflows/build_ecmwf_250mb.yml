@@ -296,10 +296,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin main
-          git checkout main
-          git pull --rebase origin main
-
+          # 1. Stage and Commit local changes FIRST to avoid dirty tree errors
           git add tiles/ecmwf/latest tiles/ecmwf/latest/last_update.txt data/raob/latest.json || true
 
           if git diff --cached --quiet; then
@@ -309,14 +306,21 @@ jobs:
 
           git commit -m "Update ECMWF 250mb tiles + dataset (${ECMWF_VALID_UTC:-unknown})"
 
+          # 2. Fetch and Rebase onto origin/main
+          # This handles updates from other workflows without erroring on dirty working tree
+          git fetch origin main
+          git rebase origin/main
+
+          # 3. Push
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "Push succeeded."
               exit 0
             fi
-            echo "Push rejected (non-fast-forward). Rebasing and retrying... attempt ${attempt}"
+            # If race condition, rebase again
+            echo "Push rejected. Rebasing and retrying... attempt ${attempt}"
             git fetch origin main
-            git pull --rebase origin main
+            git rebase origin/main
           done
 
           echo "ERROR: push failed after retries."
