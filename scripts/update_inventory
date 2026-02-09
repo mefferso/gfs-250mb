@@ -1,0 +1,61 @@
+import os
+import json
+import shutil
+import datetime
+from pathlib import Path
+
+# Config
+HISTORY_DIR = Path("data/history")
+TILES_GFS_DIR = Path("tiles/250mb") # GFS storage path
+TILES_ECMWF_DIR = Path("tiles/ecmwf")
+KEEP_DAYS = 5
+
+def main():
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # 1. Scan for valid cycle JSONs (Format: YYYYMMDDHH.json)
+    files = [f for f in HISTORY_DIR.glob("*.json") if f.name.isdigit() or (f.stem.isdigit() and f.suffix == '.json')]
+    
+    inventory = []
+    
+    # Calculate cutoff for deletion
+    cutoff_date = datetime.datetime.utcnow() - datetime.timedelta(days=KEEP_DAYS)
+    
+    for f in sorted(files, reverse=True):
+        cycle_str = f.stem # 2026020912
+        
+        try:
+            dt = datetime.datetime.strptime(cycle_str, "%Y%m%d%H")
+        except ValueError:
+            continue # Skip weird files
+
+        # 2. Cleanup Old Data
+        if dt < cutoff_date:
+            print(f"Removing old cycle: {cycle_str}")
+            # Delete JSON
+            f.unlink()
+            # Delete GFS Tiles
+            gfs_path = TILES_GFS_DIR / cycle_str
+            if gfs_path.exists(): shutil.rmtree(gfs_path)
+            # Delete ECMWF Tiles
+            ec_path = TILES_ECMWF_DIR / cycle_str
+            if ec_path.exists(): shutil.rmtree(ec_path)
+            continue
+
+        # 3. Add to inventory
+        inventory.append({
+            "cycle": cycle_str,
+            "label": dt.strftime("%Y-%m-%d %Hz"),
+            "path": f"data/history/{cycle_str}.json",
+            "gfs_tiles": f"tiles/250mb/{cycle_str}/{{z}}/{{x}}/{{y}}.png",
+            "ecmwf_tiles": f"tiles/ecmwf/{cycle_str}/{{z}}/{{x}}/{{y}}.png"
+        })
+
+    # Write inventory
+    with open("data/history/inventory.json", "w") as f:
+        json.dump(inventory, f, indent=2)
+    
+    print(f"Inventory updated. {len(inventory)} cycles available.")
+
+if __name__ == "__main__":
+    main()
