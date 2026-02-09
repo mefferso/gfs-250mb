@@ -25,7 +25,7 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt-get update
-          # Added libeccodes-dev which is required for cfgrib
+          # FIX: Install libeccodes-dev for GRIB support
           sudo apt-get install -y gdal-bin libeccodes-dev
 
       - name: Set up Python
@@ -35,7 +35,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          # Added cfgrib and eccodes here
+          # FIX: Install cfgrib and eccodes explicitly
           pip install numpy xarray[complete] cfgrib eccodes rasterio matplotlib requests pandas
 
       - name: Download GFS 250mb U/V (AWS Mirror)
@@ -43,24 +43,19 @@ jobs:
           set -e
           mkdir -p data
 
-          # Uses AWS Open Data (S3) instead of NOMADS to avoid HTTP 403 blocks
+          # FIX: Use AWS S3 Mirror to avoid HTTP 403 errors from NOMADS
           python3 << 'EOF'
           import requests
           from datetime import datetime, timedelta
           import os
           import sys
 
-          # AWS Mirror Pattern: 
-          # https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.YYYYMMDD/HH/atmos/gfs.tHHz.pgrb2.0p25.f000
-
-          # We want 00z, 06z, 12z, 18z. 
+          # AWS Mirror Pattern
+          # We check today and yesterday for 00, 06, 12, 18z cycles
           now = datetime.utcnow()
-          
-          # Candidates: Check today and yesterday
           candidates = []
           for d_offset in [0, 1]:
               d = now - timedelta(days=d_offset)
-              # Check cycles in reverse order (latest first)
               for h in [18, 12, 6, 0]:
                   candidates.append((d, h))
 
@@ -74,34 +69,29 @@ jobs:
               date_str = dt.strftime("%Y%m%d")
               cycle_str = f"{hour:02d}"
               
-              # Construct AWS S3 URL
+              # AWS URL Structure
               url = f"https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{date_str}/{cycle_str}/atmos/gfs.t{cycle_str}z.pgrb2.0p25.f000"
               
               print(f"Checking AWS S3: {date_str} {cycle_str}z ...")
               
               try:
-                  # Stream the download
                   with requests.get(url, stream=True, timeout=60) as r:
                       if r.status_code == 200:
-                          print(f"  -> Found! Downloading...")
                           with open(out_path, 'wb') as f:
-                              for chunk in r.iter_content(chunk_size=1024*1024): # 1MB chunks
-                                  if chunk:
-                                      f.write(chunk)
+                              for chunk in r.iter_content(chunk_size=1024*1024):
+                                  if chunk: f.write(chunk)
                           
-                          # Verify size (Full file is ~500MB, partial is invalid)
                           sz = os.path.getsize(out_path)
                           print(f"  -> Downloaded {sz / 1024 / 1024:.1f} MB")
                           
-                          if sz > 10_000_000: # Ensure it's not a tiny error file
+                          if sz > 10_000_000: # Valid file check
                               found = True
                               chosen_cycle = f"{date_str}{cycle_str}"
                               print(f"SUCCESS: Got GFS {chosen_cycle}")
                               break
                           else:
-                              print("  -> File too small, likely invalid.")
+                              print("  -> File too small.")
                       else:
-                          # 404 means this cycle hasn't uploaded to AWS yet
                           print(f"  -> Not available (HTTP {r.status_code})")
               except Exception as e:
                   print(f"  -> Error: {e}")
@@ -125,7 +115,6 @@ jobs:
           import matplotlib
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
-          import matplotlib.colors as mcolors
           import os
 
           WEBMERC_MAXLAT = 85.05112878
@@ -133,22 +122,18 @@ jobs:
           if not os.path.exists("data/gfs_250mb.grib2"):
               raise SystemExit("ERROR: data/gfs_250mb.grib2 not found.")
 
-          # Open GRIB with xarray (cfgrib engine)
-          # We filter for 250mb U and V
+          # Load GRIB
           try:
             ds = xr.open_dataset("data/gfs_250mb.grib2", engine="cfgrib", 
                                  backend_kwargs={'filter_by_keys': {'typeOfLevel': 'isobaricInhPa', 'level': 250}})
           except Exception:
-             # Fallback if keys differ
              ds = xr.open_dataset("data/gfs_250mb.grib2", engine="cfgrib")
 
           u = ds['u']
           v = ds['v']
+          speed = np.sqrt(u**2 + v**2) * 1.94384 # m/s to knots
           
-          # Calculate Speed (m/s -> knots)
-          speed = np.sqrt(u**2 + v**2) * 1.94384
-          
-          # Normalize coords
+          # Normalize Coords
           speed = speed.assign_coords(longitude=(((speed.longitude + 180) % 360) - 180))
           speed = speed.sortby("longitude")
           speed = speed.sel(latitude=slice(WEBMERC_MAXLAT, -WEBMERC_MAXLAT))
@@ -159,25 +144,22 @@ jobs:
           dy = float(abs(lats[1] - lats[0]))
           transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
 
-          # 1. Write RAW Speed
-          with rasterio.open(
-              "gfs_output_250mb_speed.tif", "w", driver="GTiff",
+          # Write RAW
+          with rasterio.open("gfs_output_250mb_speed.tif", "w", driver="GTiff",
               height=speed.shape[0], width=speed.shape[1], count=1,
               dtype='float32', crs="EPSG:4326", transform=transform, nodata=np.nan
           ) as dst:
               dst.write(speed.values.astype('float32'), 1)
 
-          # 2. Write COLOR Speed
+          # Write COLOR
           vmin, vmax = 20.0, 225.0
           data = np.clip(speed.values, vmin, vmax)
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
           
           turbo = plt.get_cmap('turbo')
-          rgba = turbo(norm)
-          rgba_u8 = (rgba * 255).astype('uint8')
+          rgba_u8 = (turbo(norm) * 255).astype('uint8')
           
-          with rasterio.open(
-              "gfs_output_250mb_color.tif", "w", driver="GTiff",
+          with rasterio.open("gfs_output_250mb_color.tif", "w", driver="GTiff",
               height=rgba_u8.shape[0], width=rgba_u8.shape[1], count=3,
               dtype='uint8', crs="EPSG:4326", transform=transform
           ) as dst:
@@ -199,57 +181,51 @@ jobs:
       - name: Update Dataset (Fill GFS Data)
         run: |
           set -e
-          # 1. Fetch live RAOBs first (creates data/raob/obs_latest.csv)
           python scripts/fetch_live_raob.py
-          
-          # 2. Merge with GFS Tiff -> creates/updates data/raob/latest.json
           python scripts/build_raob_250mb_dataset.py \
              --in "data/raob/obs_latest.csv" \
              --out "data/raob/latest.json" \
              --gfs-tif gfs_output_250mb_speed.tif \
              --gfs-units kt
 
-      # --- ARCHIVE STEP ---
       - name: Archive Tiles and JSON
         run: |
           CYCLE="${GFS_VALID_UTC}"
           if [ -z "$CYCLE" ]; then CYCLE=$(date -u +"%Y%m%d%H"); fi
-          
           echo "Archiving for cycle: $CYCLE"
           
-          # Archive GFS Tiles
           mkdir -p tiles/250mb/$CYCLE
           cp -r tiles/250mb/latest/* tiles/250mb/$CYCLE/ || true
-
-          # Archive JSON
+          
           mkdir -p data/history
           cp data/raob/latest.json data/history/$CYCLE.json || true
-
-          # Update Inventory
+          
           python scripts/update_inventory.py
 
       - name: Commit updated GFS tiles + dataset
         shell: bash
         run: |
           set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin main
-          git checkout main
-          git pull --rebase origin main
-
-          # Commit new tiles, JSON, history, and inventory
+          # 1. Stage files
           git add tiles/250mb/latest tiles/250mb/2* data/raob/latest.json data/history/ || true
           
+          # 2. Check for changes
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
+          # 3. Commit locally FIRST
           git commit -m "Update GFS tiles + Archive ${GFS_VALID_UTC:-unknown}"
 
+          # 4. Pull/Rebase AFTER committing (Fixes 'unstaged changes' error)
+          git fetch origin main
+          git pull --rebase origin main
+
+          # 5. Push
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "Push succeeded."
