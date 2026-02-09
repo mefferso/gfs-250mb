@@ -25,7 +25,8 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gdal-bin
+          # Added libeccodes-dev which is required for cfgrib
+          sudo apt-get install -y gdal-bin libeccodes-dev
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,14 +35,15 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install numpy xarray[complete] rasterio matplotlib requests pandas
+          # Added cfgrib and eccodes here
+          pip install numpy xarray[complete] cfgrib eccodes rasterio matplotlib requests pandas
 
-      - name: Download GFS 250mb U/V (0.25 deg)
+      - name: Download GFS 250mb U/V (AWS Mirror)
         run: |
           set -e
           mkdir -p data
 
-          # switch to AWS Mirror for reliability
+          # Uses AWS Open Data (S3) instead of NOMADS to avoid HTTP 403 blocks
           python3 << 'EOF'
           import requests
           from datetime import datetime, timedelta
@@ -79,7 +81,7 @@ jobs:
               
               try:
                   # Stream the download
-                  with requests.get(url, stream=True, timeout=20) as r:
+                  with requests.get(url, stream=True, timeout=60) as r:
                       if r.status_code == 200:
                           print(f"  -> Found! Downloading...")
                           with open(out_path, 'wb') as f:
@@ -112,6 +114,7 @@ jobs:
               with open(env_path, "a") as f:
                   f.write(f"GFS_VALID_UTC={chosen_cycle}\n")
           EOF
+
       - name: Generate GFS 250mb GeoTIFFs (Raw + Color)
         run: |
           python << 'EOF'
@@ -125,7 +128,6 @@ jobs:
           import matplotlib.colors as mcolors
           import os
 
-          # Web Mercator limits (approx 85 deg N/S)
           WEBMERC_MAXLAT = 85.05112878
 
           if not os.path.exists("data/gfs_250mb.grib2"):
@@ -133,9 +135,6 @@ jobs:
 
           # Open GRIB with xarray (cfgrib engine)
           # We filter for 250mb U and V
-          # Note: cfgrib might see them as 'u' and 'v' or 'u2'/'v2' if multiple steps.
-          # Here we fetched only f000 so should be simple.
-          
           try:
             ds = xr.open_dataset("data/gfs_250mb.grib2", engine="cfgrib", 
                                  backend_kwargs={'filter_by_keys': {'typeOfLevel': 'isobaricInhPa', 'level': 250}})
@@ -143,120 +142,58 @@ jobs:
              # Fallback if keys differ
              ds = xr.open_dataset("data/gfs_250mb.grib2", engine="cfgrib")
 
-          # We expect variables 'u' and 'v' (or 'gh' etc). Let's find u/v.
-          # Usually shortName is 'u' / 'v'.
-          
           u = ds['u']
           v = ds['v']
           
           # Calculate Speed (m/s -> knots)
-          # 1 m/s = 1.94384 kt
           speed = np.sqrt(u**2 + v**2) * 1.94384
           
-          # GFS is 0..360 longitude. We need -180..180 for standard web maps, usually.
-          # Or we can keep 0..360 but let's normalize to standard WGS84 -180..180 for Rasterio.
-          
+          # Normalize coords
           speed = speed.assign_coords(longitude=(((speed.longitude + 180) % 360) - 180))
           speed = speed.sortby("longitude")
-          
-          # Clip Latitude to WebMercator limits so gdal2tiles doesn't freak out
           speed = speed.sel(latitude=slice(WEBMERC_MAXLAT, -WEBMERC_MAXLAT))
           
-          # Extract values and geo-transform info
-          # GFS is typically 0.25 deg resolution
           lats = speed.latitude.values
           lons = speed.longitude.values
-          
-          # Construct Affine Transform
-          # (min_lon, delta_lon, 0, max_lat, 0, delta_lat)
-          # Note: GFS lats are usually descending (90 -> -90). rasterio handles negative dy.
-          
           dx = float(abs(lons[1] - lons[0]))
           dy = float(abs(lats[1] - lats[0]))
-          
-          # West, North, x_res, y_res (negative for north-up usually? No, standard is positive dx, negative dy if top-left origin)
-          # from_origin(west, north, xsize, ysize)
           transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
 
-          # 1. Write RAW Speed (Float32) for data picking
+          # 1. Write RAW Speed
           with rasterio.open(
-              "gfs_output_250mb_speed.tif",
-              "w",
-              driver="GTiff",
-              height=speed.shape[0],
-              width=speed.shape[1],
-              count=1,
-              dtype='float32',
-              crs="EPSG:4326",
-              transform=transform,
-              nodata=np.nan
+              "gfs_output_250mb_speed.tif", "w", driver="GTiff",
+              height=speed.shape[0], width=speed.shape[1], count=1,
+              dtype='float32', crs="EPSG:4326", transform=transform, nodata=np.nan
           ) as dst:
               dst.write(speed.values.astype('float32'), 1)
 
-          # 2. Write COLOR Speed (RGBA Uint8) for visualization
-          # Colormap: Turbo (similar to Windy) or Jet. Let's use Turbo.
-          # Range: 20 kt to 225 kt (Jetstream range)
-          
+          # 2. Write COLOR Speed
           vmin, vmax = 20.0, 225.0
           data = np.clip(speed.values, vmin, vmax)
-          # Normalize 0..1
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
           
-          # Apply Colormap
-          # turbo is available in recent matplotlib
           turbo = plt.get_cmap('turbo')
-          # Create custom cmap with transparent for low values? 
-          # Or just solid. Let's make < 20kt transparent or white.
-          # Actually, let's keep it solid but use a colorbar.
-          
-          # Convert to RGBA
-          colors = turbo(np.linspace(0, 1, 255))
-          # Prepend white/transparent for bottom?
-          white = np.array([[1, 1, 1, 1]]) # Opaque white for low wind
-          new_colors = np.vstack((colors, white)) # Actually usually we map values. 
-          
-          # Let's just map standard turbo.
-          # Apply to data
-          # (H, W, 4) -> (4, H, W)
-          
-          # Let's explicitly build RGBA buffer
-          # plt.cm.turbo(norm) returns float 0..1
           rgba = turbo(norm)
-          
-          # Convert to uint8 0..255
           rgba_u8 = (rgba * 255).astype('uint8')
           
           with rasterio.open(
-              "gfs_output_250mb_color.tif",
-              "w",
-              driver="GTiff",
-              height=rgba_u8.shape[0],
-              width=rgba_u8.shape[1],
-              count=3, # We'll just do RGB for tiles, or 4 for RGBA
-              dtype='uint8',
-              crs="EPSG:4326",
-              transform=transform
+              "gfs_output_250mb_color.tif", "w", driver="GTiff",
+              height=rgba_u8.shape[0], width=rgba_u8.shape[1], count=3,
+              dtype='uint8', crs="EPSG:4326", transform=transform
           ) as dst:
-              dst.write(rgba_u8[:, :, 0], 1) # R
-              dst.write(rgba_u8[:, :, 1], 2) # G
-              dst.write(rgba_u8[:, :, 2], 3) # B
-              # dst.write(rgba_u8[:, :, 3], 4) # A
+              dst.write(rgba_u8[:, :, 0], 1)
+              dst.write(rgba_u8[:, :, 1], 2)
+              dst.write(rgba_u8[:, :, 2], 3)
 
           print("GeoTIFFs written successfully.")
           EOF
 
       - name: Generate map tiles (zoom 0-4)
         run: |
-          # Clean old tiles
           rm -rf tiles/250mb/latest
           mkdir -p tiles/250mb/latest
-          
-          # Use gdal2tiles to generate XYZ folder structure
-          # -r bilinear for smoother look, -z 0-4 for low zoom global view
           gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 \
             gfs_output_250mb_color.tif tiles/250mb/latest
-            
-          # Timestamp
           date > tiles/250mb/latest/last_update.txt
 
       - name: Update Dataset (Fill GFS Data)
@@ -272,26 +209,23 @@ jobs:
              --gfs-tif gfs_output_250mb_speed.tif \
              --gfs-units kt
 
-      # --- NEW STEP: Archive Data ---
+      # --- ARCHIVE STEP ---
       - name: Archive Tiles and JSON
         run: |
-          # 1. Get the cycle time
-          # If GFS_VALID_UTC is set, use it. Otherwise use current hour.
           CYCLE="${GFS_VALID_UTC}"
           if [ -z "$CYCLE" ]; then CYCLE=$(date -u +"%Y%m%d%H"); fi
           
           echo "Archiving for cycle: $CYCLE"
           
-          # 2. Archive GFS Tiles
-          # GFS tiles are in tiles/250mb/latest
+          # Archive GFS Tiles
           mkdir -p tiles/250mb/$CYCLE
           cp -r tiles/250mb/latest/* tiles/250mb/$CYCLE/ || true
 
-          # 3. Archive JSON
+          # Archive JSON
           mkdir -p data/history
           cp data/raob/latest.json data/history/$CYCLE.json || true
 
-          # 4. Update Inventory & Cleanup
+          # Update Inventory
           python scripts/update_inventory.py
 
       - name: Commit updated GFS tiles + dataset
@@ -302,17 +236,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Fetch latest to avoid conflicts
           git fetch origin main
           git checkout main
           git pull --rebase origin main
 
-          # Add new tiles, JSON, history, and inventory
+          # Commit new tiles, JSON, history, and inventory
           git add tiles/250mb/latest tiles/250mb/2* data/raob/latest.json data/history/ || true
           
-          # Check status
-          git status
-
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
@@ -320,7 +250,6 @@ jobs:
 
           git commit -m "Update GFS tiles + Archive ${GFS_VALID_UTC:-unknown}"
 
-          # Push with retry
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "Push succeeded."
