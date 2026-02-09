@@ -1,0 +1,9 @@
+[
+  {
+    "cycle": "2026020900",
+    "label": "2026-02-09 00z",
+    "path": "data/history/2026020900.json",
+    "gfs_tiles": "tiles/250mb/2026020900/{z}/{x}/{y}.png",
+    "ecmwf_tiles": "tiles/ecmwf/2026020900/{z}/{x}/{y}.png"
+  }
+]
