@@ -1,5 +1,12 @@
 [
   {
+    "cycle": "2026021106",
+    "label": "2026-02-11 06z",
+    "path": "data/history/2026021106.json",
+    "gfs_tiles": "tiles/250mb/2026021106/{z}/{x}/{y}.png",
+    "ecmwf_tiles": "tiles/ecmwf/2026021106/{z}/{x}/{y}.png"
+  },
+  {
     "cycle": "2026021100",
     "label": "2026-02-11 00z",
     "path": "data/history/2026021100.json",
