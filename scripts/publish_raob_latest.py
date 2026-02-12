@@ -7,8 +7,6 @@ Atomic publisher:
 - Merges them into data/raob/latest.json
 - Archives combined JSON to data/history/<cycle>.json
 - Promotes tiles for that cycle -> tiles/<model>/latest/
-
-This prevents the website from ever showing a "partial model" cycle.
 """
 
 from __future__ import annotations
