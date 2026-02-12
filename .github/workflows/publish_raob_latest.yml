@@ -1,0 +1,74 @@
+name: Publish RAOB Latest (Atomic)
+
+on:
+  push:
+    paths:
+      - "data/raob/staging/**"
+  workflow_dispatch:
+
+concurrency:
+  group: raob-publisher-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Publish newest complete cycle (GFS + ECMWF)
+        run: |
+          set -e
+          python scripts/publish_raob_latest.py \
+            --staging-root "data/raob/staging" \
+            --required-models "GFS,ECMWF" \
+            --out-latest "data/raob/latest.json" \
+            --history-dir "data/history" \
+            --tiles-map "GFS=tiles/250mb,ECMWF=tiles/ecmwf"
+
+      - name: Update inventory + cleanup old cycles
+        run: |
+          set -e
+          python scripts/update_inventory.py
+
+      - name: Commit published latest + inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/raob/latest.json data/history/ tiles/250mb/latest tiles/ecmwf/latest || true
+
+          if git diff --cached --quiet; then
+            echo "No publish changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Publish RAOB latest (atomic)"
+
+          git fetch origin main
+          git pull --rebase origin main
+
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "Push succeeded."
+              exit 0
+            fi
+            echo "Push rejected. Rebasing..."
+            git fetch origin main
+            git pull --rebase origin main
+          done
+          exit 1
