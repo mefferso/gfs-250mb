@@ -1,4 +1,4 @@
-name: Build ECMWF 250mb Wind Tiles
+name: Build ECMWF 250mb Wind (Cycle-Staged)
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: raob-cycle-staging-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -36,7 +36,7 @@ jobs:
         run: |
           pip install numpy xarray cfgrib eccodes rasterio matplotlib requests pandas ecmwf-opendata
 
-      - name: Download latest available ECMWF (High Res) + set ECMWF_VALID_UTC
+      - name: Download latest available ECMWF (High Res)
         run: |
           set -e
           mkdir -p data
@@ -49,120 +49,68 @@ jobs:
           import numpy as np
 
           client = Client()
-
           out_path = "data/ecmwf.grib2"
-          env_path = os.environ.get("GITHUB_ENV")
 
           def validate_grib(path: str) -> bool:
             try:
-              # Iterate to ensure both U and V components exist
               for sn in ("u", "v"):
-                # Open dataset filtering for the specific shortName
                 ds = xr.open_dataset(
                   path,
                   engine="cfgrib",
-                  backend_kwargs={
-                    "filter_by_keys": {"shortName": sn},
-                    "indexpath": ""
-                  },
+                  backend_kwargs={"filter_by_keys": {"shortName": sn}, "indexpath": ""}
                 )
-                
                 if sn not in ds:
-                  print(f"Validation Error: Variable '{sn}' not found in GRIB.")
                   return False
-                
-                # Verify we have the 250mb level without triggering PandaIndex error
-                # If isobaricInhPa is missing, it might be a different level type, which is a fail.
-                if "isobaricInhPa" in ds.coords:
-                    lev = ds["isobaricInhPa"].values
-                    # Handle scalar (0-d array) which happens with single-level files
-                    if np.ndim(lev) == 0:
-                        val = float(lev)
-                    else:
-                        # If multiple levels exist (unlikely here), check if 250 is present
-                        val = 250.0 if 250 in lev else float(lev[0])
-                    
-                    if abs(val - 250.0) > 1.0:
-                        print(f"Validation Error: Expected level 250, found {val}")
-                        return False
-                else:
-                    print("Validation Error: Coordinate 'isobaricInhPa' not found.")
-                    return False
-
+                if "isobaricInhPa" not in ds.coords:
+                  return False
+                lev = ds["isobaricInhPa"].values
+                val = float(lev) if np.ndim(lev) == 0 else float(lev[0])
+                if abs(val - 250.0) > 1.0:
+                  return False
               return True
-            except Exception as e:
-              print(f"Validation crash: {e}")
+            except Exception:
               return False
 
           def attempt(date_str, hour):
             print(f"Trying ECMWF: {date_str} {hour:02d}z")
             if os.path.exists(out_path):
               os.remove(out_path)
-
             try:
-                client.retrieve(
-                  date=date_str,
-                  time=hour,
-                  step=0,
-                  type="fc",
-                  levtype="pl",
-                  levelist=250,
-                  param=["u", "v"],
-                  resol="0p25",
-                  target=out_path
-                )
+              client.retrieve(
+                date=date_str,
+                time=hour,
+                step=0,
+                type="fc",
+                levtype="pl",
+                levelist=250,
+                param=["u", "v"],
+                resol="0p25",
+                target=out_path
+              )
             except Exception as e:
-                print(f"Download API Error: {e}")
-                return False
+              print("Download error:", e)
+              return False
 
             try:
               sz = os.path.getsize(out_path)
             except Exception:
               sz = 0
-
-            print(f"Downloaded size: {sz} bytes")
-
-            # Basic size check (approx 1MB for global 0.25deg U+V at one level)
+            print("Downloaded size:", sz)
             if sz < 200_000:
-              print("File too small; treating as failure.")
               return False
+            return validate_grib(out_path)
 
-            if validate_grib(out_path):
-              print("Validation OK.")
-              return True
-
-            print("Validation NOT OK; treating as failure.")
-            return False
-
-          # pick cycles (00/12) with a little lag for publishing
           now = datetime.utcnow() - timedelta(hours=5)
           today = now.strftime("%Y%m%d")
           yday = (now - timedelta(days=1)).strftime("%Y%m%d")
 
-          candidates = [
-            (today, 12),
-            (today, 0),
-            (yday, 12),
-            (yday, 0),
-          ]
-
-          ok = False
-          chosen = None
-
+          candidates = [(today, 12), (today, 0), (yday, 12), (yday, 0)]
           for date_str, hour in candidates:
             if attempt(date_str, hour):
-              ok = True
-              chosen = f"{date_str}{hour:02d}"
-              break
+              print("ECMWF download OK.")
+              raise SystemExit(0)
 
-          if not ok:
-            raise SystemExit("ERROR: Could not download any candidate ECMWF cycle.")
-
-          if env_path:
-            with open(env_path, "a", encoding="utf-8") as f:
-              f.write(f"ECMWF_VALID_UTC={chosen}\n")
-
-          print(f"Using ECMWF_VALID_UTC={chosen}")
+          raise SystemExit("ERROR: Could not download any candidate ECMWF cycle.")
           EOF
 
       - name: Generate ECMWF 250mb GeoTIFFs (Raw + Color)
@@ -175,7 +123,6 @@ jobs:
           import matplotlib
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
-          import matplotlib.colors as mcolors
           import os
 
           WEBMERC_MAXLAT = 85.05112878
@@ -183,36 +130,20 @@ jobs:
           if not os.path.exists("data/ecmwf.grib2"):
               raise SystemExit("ERROR: data/ecmwf.grib2 not found.")
 
-          # Load U and V
-          # Note: We use filter_by_keys because U and V are often in separate GRIB messages
-          ds_u = xr.open_dataset(
-              "data/ecmwf.grib2",
-              engine="cfgrib",
-              backend_kwargs={
-                  "filter_by_keys": {"shortName": "u"},
-                  "indexpath": ""
-              },
+          ds_u = xr.open_dataset("data/ecmwf.grib2", engine="cfgrib",
+              backend_kwargs={"filter_by_keys": {"shortName": "u"}, "indexpath": ""}
           )
-          ds_v = xr.open_dataset(
-              "data/ecmwf.grib2",
-              engine="cfgrib",
-              backend_kwargs={
-                  "filter_by_keys": {"shortName": "v"},
-                  "indexpath": ""
-              },
+          ds_v = xr.open_dataset("data/ecmwf.grib2", engine="cfgrib",
+              backend_kwargs={"filter_by_keys": {"shortName": "v"}, "indexpath": ""}
           )
 
-          # Extract data (handling scalar coordinate issue here too just in case)
           u = ds_u["u"]
           v = ds_v["v"]
+          speed = np.sqrt(u**2 + v**2) * 1.94384  # m/s -> kt
 
-          # m/s -> kt
-          speed = np.sqrt(u**2 + v**2) * 1.94384
-
-          # normalize lon to [-180, 180], sort, clip to WebMerc
-          speed = speed.assign_coords(
-              longitude=(((speed.longitude + 180) % 360) - 180)
-          ).sortby("longitude").sortby("latitude", ascending=False)
+          speed = speed.assign_coords(longitude=(((speed.longitude + 180) % 360) - 180))
+          speed = speed.sortby("longitude")
+          speed = speed.sortby("latitude", ascending=False)
           speed = speed.sel(latitude=slice(WEBMERC_MAXLAT, -WEBMERC_MAXLAT))
 
           lats = speed.latitude.values
@@ -221,121 +152,99 @@ jobs:
           dy = float(abs(lats[1] - lats[0]))
           transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
 
-          # RAW
-          with rasterio.open(
-              "ecmwf_output_250mb_speed.tif",
-              "w",
-              driver="GTiff",
-              height=speed.shape[0],
-              width=speed.shape[1],
-              count=1,
-              dtype="float32",
-              crs="EPSG:4326",
-              transform=transform,
-              nodata=np.nan,
+          with rasterio.open("ecmwf_output_250mb_speed.tif", "w", driver="GTiff",
+              height=speed.shape[0], width=speed.shape[1], count=1,
+              dtype='float32', crs="EPSG:4326", transform=transform, nodata=np.nan
           ) as dst:
-              dst.write(speed.values.astype("float32"), 1)
+              dst.write(speed.values.astype('float32'), 1)
 
-          # COLOR
           vmin, vmax = 20.0, 225.0
           data = np.clip(speed.values, vmin, vmax)
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
 
-          turbo = plt.get_cmap("turbo")
-          colors = turbo(np.linspace(0, 1, 255))
-          white = np.array([[1, 1, 1, 1]])
-          new_colors = np.vstack((colors, white))
-          cmap = mcolors.LinearSegmentedColormap.from_list("TurboWhite", new_colors)
+          turbo = plt.get_cmap('turbo')
+          rgba_u8 = (turbo(norm) * 255).astype('uint8')
 
-          rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
-
-          with rasterio.open(
-              "ecmwf_output_250mb_color.tif",
-              "w",
-              driver="GTiff",
-              height=rgb.shape[0],
-              width=rgb.shape[1],
-              count=3,
-              dtype="uint8",
-              crs="EPSG:4326",
-              transform=transform,
+          with rasterio.open("ecmwf_output_250mb_color.tif", "w", driver="GTiff",
+              height=rgba_u8.shape[0], width=rgba_u8.shape[1], count=3,
+              dtype='uint8', crs="EPSG:4326", transform=transform
           ) as dst:
-              dst.write(rgb[:, :, 0], 1)
-              dst.write(rgb[:, :, 1], 2)
-              dst.write(rgb[:, :, 2], 3)
+              dst.write(rgba_u8[:, :, 0], 1)
+              dst.write(rgba_u8[:, :, 1], 2)
+              dst.write(rgba_u8[:, :, 2], 3)
 
-          print("GeoTIFFs written successfully")
+          print("GeoTIFFs written successfully.")
           EOF
 
-      - name: Generate map tiles (zoom 0-4)
-        run: |
-          rm -rf tiles/ecmwf/latest
-          mkdir -p tiles/ecmwf/latest
-          gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 \
-            ecmwf_output_250mb_color.tif tiles/ecmwf/latest
-          date > tiles/ecmwf/latest/last_update.txt
-
-      - name: Update Dataset (Fill ECMWF Data)
+      - name: Fetch RAOB obs (00/12Z) -> obs_latest.csv
         run: |
           set -e
-          if [ -f "data/raob/latest.json" ]; then
-            python scripts/build_raob_250mb_dataset.py \
-              --in "data/raob/latest.json" \
-              --out "data/raob/latest.json" \
-              --ecmwf-tif ecmwf_output_250mb_speed.tif \
-              --ecmwf-units kt
-          else
-            echo "WARNING: data/raob/latest.json not found. Skipping merge."
-          fi
+          python scripts/fetch_live_raob.py
 
-     # ... (Existing steps for Generate Tiles and Update Dataset remain the same) ...
-
-      # --- NEW STEP: Archive Data ---
-      - name: Archive Tiles and JSON
+      - name: Derive RAOB cycle string (YYYYMMDDHH) from obs_latest.csv
         run: |
-          # 1. Get the cycle time from the environment or generate one
-          # If ECMWF_VALID_UTC is set (e.g., 2026020912), use it. Otherwise use current hour.
-          CYCLE="${ECMWF_VALID_UTC}"
-          if [ -z "$CYCLE" ]; then CYCLE=$(date -u +"%Y%m%d%H"); fi
-          
-          echo "Archiving for cycle: $CYCLE"
-          
-          # 2. Archive Tiles
-          mkdir -p tiles/ecmwf/$CYCLE
-          # Copy contents of 'latest' to timestamped folder
-          cp -r tiles/ecmwf/latest/* tiles/ecmwf/$CYCLE/ || true
+          python3 << 'EOF'
+          import csv
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import os
 
-          # 3. Archive JSON
-          mkdir -p data/history
-          cp data/raob/latest.json data/history/$CYCLE.json || true
+          p = Path("data/raob/obs_latest.csv")
+          with p.open("r", encoding="utf-8", newline="") as f:
+              r = csv.DictReader(f)
+              row = next(r)
+          v = (row.get("valid_utc") or "").strip()
+          if v.endswith("Z"):
+              v2 = v[:-1] + "+00:00"
+          else:
+              v2 = v
+          dt = datetime.fromisoformat(v2).astimezone(timezone.utc)
+          cycle = dt.strftime("%Y%m%d%H")
 
-          # 4. Update Inventory & Cleanup
-          python scripts/update_inventory.py
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"RAOB_CYCLE={cycle}\n")
+              env.write(f"RAOB_VALID_UTC={dt.strftime('%Y-%m-%dT%H:%M:%SZ')}\n")
+          print("RAOB_CYCLE =", cycle)
+          EOF
 
-      - name: Commit updated ECMWF tiles + dataset
+      - name: Generate ECMWF map tiles into cycle folder (zoom 0-4)
+        run: |
+          set -e
+          rm -rf "tiles/ecmwf/${RAOB_CYCLE}"
+          mkdir -p "tiles/ecmwf/${RAOB_CYCLE}"
+          gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 \
+            ecmwf_output_250mb_color.tif "tiles/ecmwf/${RAOB_CYCLE}"
+          date > "tiles/ecmwf/${RAOB_CYCLE}/last_update.txt"
+
+      - name: Build staged partial JSON for ECMWF
+        run: |
+          set -e
+          python scripts/build_raob_model_partial.py \
+            --obs "data/raob/obs_latest.csv" \
+            --model "ECMWF" \
+            --tif "ecmwf_output_250mb_speed.tif" \
+            --units "kt" \
+            --out "data/raob/staging/${RAOB_CYCLE}/ECMWF.json"
+
+      - name: Commit staged ECMWF outputs
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Add inventory, history JSON, and new tile folder
-          git add tiles/ecmwf/latest tiles/ecmwf/2* data/raob/latest.json data/history/ || true
-          
-          # Debug
-          git status
+          git add "tiles/ecmwf/${RAOB_CYCLE}" "data/raob/staging/${RAOB_CYCLE}/ECMWF.json" || true
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "Update ECMWF tiles + Archive ${ECMWF_VALID_UTC:-unknown}"
+          git commit -m "Stage ECMWF for RAOB ${RAOB_CYCLE}"
 
           git fetch origin main
-          git rebase origin/main
-          
-          # Push loop
+          git pull --rebase origin main
+
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "Push succeeded."
@@ -343,6 +252,6 @@ jobs:
             fi
             echo "Push rejected. Rebasing..."
             git fetch origin main
-            git rebase origin/main
+            git pull --rebase origin main
           done
           exit 1
