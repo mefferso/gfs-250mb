@@ -1,8 +1,8 @@
-name: Build ECMWF 250mb Wind (Cycle-Staged)
+name: Build GFS 250mb Wind (Cycle-Staged)
 
 on:
   schedule:
-    - cron: "30 */6 * * *"
+    - cron: "15 */6 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -25,7 +25,7 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gdal-bin
+          sudo apt-get install -y gdal-bin libeccodes-dev
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,86 +34,61 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install numpy xarray cfgrib eccodes rasterio matplotlib requests pandas ecmwf-opendata
+          # ADDED scipy HERE
+          pip install numpy scipy xarray[complete] cfgrib eccodes rasterio matplotlib requests pandas
 
-      - name: Download latest available ECMWF (High Res)
+      - name: Download GFS 250mb U/V (AWS Mirror)
         run: |
           set -e
           mkdir -p data
 
           python3 << 'EOF'
-          from ecmwf.opendata import Client
+          import requests
           from datetime import datetime, timedelta
-          import os
-          import xarray as xr
-          import numpy as np
+          import os, sys
 
-          client = Client()
-          out_path = "data/ecmwf.grib2"
+          now = datetime.utcnow()
+          candidates = []
+          for d_offset in [0, 1]:
+              d = now - timedelta(days=d_offset)
+              for h in [18, 12, 6, 0]:
+                  candidates.append((d, h))
 
-          def validate_grib(path: str) -> bool:
-            try:
-              for sn in ("u", "v"):
-                ds = xr.open_dataset(
-                  path,
-                  engine="cfgrib",
-                  backend_kwargs={"filter_by_keys": {"shortName": sn}, "indexpath": ""}
-                )
-                if sn not in ds:
-                  return False
-                if "isobaricInhPa" not in ds.coords:
-                  return False
-                lev = ds["isobaricInhPa"].values
-                val = float(lev) if np.ndim(lev) == 0 else float(lev[0])
-                if abs(val - 250.0) > 1.0:
-                  return False
-              return True
-            except Exception:
-              return False
+          out_path = "data/gfs_250mb.grib2"
+          found = False
+          chosen_cycle = ""
 
-          def attempt(date_str, hour):
-            print(f"Trying ECMWF: {date_str} {hour:02d}z")
-            if os.path.exists(out_path):
-              os.remove(out_path)
-            try:
-              client.retrieve(
-                date=date_str,
-                time=hour,
-                step=0,
-                type="fc",
-                levtype="pl",
-                levelist=250,
-                param=["u", "v"],
-                resol="0p25",
-                target=out_path
-              )
-            except Exception as e:
-              print("Download error:", e)
-              return False
+          for (dt, hour) in candidates:
+              date_str = dt.strftime("%Y%m%d")
+              cycle_str = f"{hour:02d}"
+              url = f"https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{date_str}/{cycle_str}/atmos/gfs.t{cycle_str}z.pgrb2.0p25.f000"
+              print(f"Checking AWS S3: {date_str} {cycle_str}z ...")
 
-            try:
-              sz = os.path.getsize(out_path)
-            except Exception:
-              sz = 0
-            print("Downloaded size:", sz)
-            if sz < 200_000:
-              return False
-            return validate_grib(out_path)
+              try:
+                  with requests.get(url, stream=True, timeout=60) as r:
+                      if r.status_code == 200:
+                          with open(out_path, 'wb') as f:
+                              for chunk in r.iter_content(chunk_size=1024*1024):
+                                  if chunk:
+                                      f.write(chunk)
+                          sz = os.path.getsize(out_path)
+                          print(f"  -> Downloaded {sz / 1024 / 1024:.1f} MB")
+                          if sz > 10_000_000:
+                              found = True
+                              chosen_cycle = f"{date_str}{cycle_str}"
+                              print(f"SUCCESS: Got GFS {chosen_cycle}")
+                              break
+                      else:
+                          print(f"  -> Not available (HTTP {r.status_code})")
+              except Exception as e:
+                  print(f"  -> Error: {e}")
 
-          now = datetime.utcnow() - timedelta(hours=5)
-          today = now.strftime("%Y%m%d")
-          yday = (now - timedelta(days=1)).strftime("%Y%m%d")
-
-          candidates = [(today, 12), (today, 0), (yday, 12), (yday, 0)]
-          for date_str, hour in candidates:
-            if attempt(date_str, hour):
-              print("ECMWF download OK.")
-              raise SystemExit(0)
-
-          raise SystemExit("ERROR: Could not download any candidate ECMWF cycle.")
+          if not found:
+              print("ERROR: Could not download any GFS cycle from AWS.")
+              sys.exit(1)
           EOF
 
-      - name: Generate ECMWF 250mb GeoTIFFs (Raw + Color)
+      - name: Generate GFS 250mb GeoTIFFs (Raw + Color)
         run: |
           python << 'EOF'
           import xarray as xr
@@ -128,23 +103,17 @@ jobs:
 
           WEBMERC_MAXLAT = 85.05112878
 
-          if not os.path.exists("data/ecmwf.grib2"):
-              raise SystemExit("ERROR: data/ecmwf.grib2 not found.")
+          if not os.path.exists("data/gfs_250mb.grib2"):
+              raise SystemExit("ERROR: data/gfs_250mb.grib2 not found.")
 
-          ds_u = xr.open_dataset("data/ecmwf.grib2", engine="cfgrib",
-              backend_kwargs={"filter_by_keys": {"shortName": "u"}, "indexpath": ""}
-          )
-          ds_v = xr.open_dataset("data/ecmwf.grib2", engine="cfgrib",
-              backend_kwargs={"filter_by_keys": {"shortName": "v"}, "indexpath": ""}
-          )
-
-          u = ds_u["u"]
-          v = ds_v["v"]
+          ds = xr.open_dataset("data/gfs_250mb.grib2", engine="cfgrib",
+                               backend_kwargs={'filter_by_keys': {'typeOfLevel': 'isobaricInhPa', 'level': 250}})
+          u = ds['u']
+          v = ds['v']
           speed = np.sqrt(u**2 + v**2) * 1.94384  # m/s -> kt
 
           speed = speed.assign_coords(longitude=(((speed.longitude + 180) % 360) - 180))
           speed = speed.sortby("longitude")
-          speed = speed.sortby("latitude", ascending=False)
           speed = speed.sel(latitude=slice(WEBMERC_MAXLAT, -WEBMERC_MAXLAT))
 
           lats = speed.latitude.values
@@ -154,7 +123,7 @@ jobs:
           transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
 
           # 1. Write Raw GeoTIFF
-          with rasterio.open("ecmwf_output_250mb_speed.tif", "w", driver="GTiff",
+          with rasterio.open("gfs_output_250mb_speed.tif", "w", driver="GTiff",
               height=speed.shape[0], width=speed.shape[1], count=1,
               dtype='float32', crs="EPSG:4326", transform=transform, nodata=np.nan
           ) as dst:
@@ -168,7 +137,7 @@ jobs:
           turbo = plt.get_cmap('turbo')
           rgba_u8 = (turbo(norm) * 255).astype('uint8')
 
-          with rasterio.open("ecmwf_output_250mb_color.tif", "w", driver="GTiff",
+          with rasterio.open("gfs_output_250mb_color.tif", "w", driver="GTiff",
               height=rgba_u8.shape[0], width=rgba_u8.shape[1], count=3,
               dtype='uint8', crs="EPSG:4326", transform=transform
           ) as dst:
@@ -232,45 +201,45 @@ jobs:
           print("RAOB_CYCLE =", cycle)
           EOF
 
-      - name: Generate ECMWF map tiles into cycle folder (zoom 0-4)
+      - name: Generate GFS map tiles into cycle folder (zoom 0-4)
         run: |
           set -e
-          rm -rf "tiles/ecmwf/${RAOB_CYCLE}"
-          mkdir -p "tiles/ecmwf/${RAOB_CYCLE}"
+          rm -rf "tiles/250mb/${RAOB_CYCLE}"
+          mkdir -p "tiles/250mb/${RAOB_CYCLE}"
           
           # Generate Tiles
           gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 \
-            ecmwf_output_250mb_color.tif "tiles/ecmwf/${RAOB_CYCLE}"
+            gfs_output_250mb_color.tif "tiles/250mb/${RAOB_CYCLE}"
           
-          # Copy Sidecar Grid and Timestamp
-          cp grid.json "tiles/ecmwf/${RAOB_CYCLE}/grid.json"
-          date > "tiles/ecmwf/${RAOB_CYCLE}/last_update.txt"
+          # Copy Sidecar Grid and timestamp
+          cp grid.json "tiles/250mb/${RAOB_CYCLE}/grid.json"
+          date > "tiles/250mb/${RAOB_CYCLE}/last_update.txt"
 
-      - name: Build staged partial JSON for ECMWF
+      - name: Build staged partial JSON for GFS
         run: |
           set -e
           python scripts/build_raob_model_partial.py \
             --obs "data/raob/obs_latest.csv" \
-            --model "ECMWF" \
-            --tif "ecmwf_output_250mb_speed.tif" \
+            --model "GFS" \
+            --tif "gfs_output_250mb_speed.tif" \
             --units "kt" \
-            --out "data/raob/staging/${RAOB_CYCLE}/ECMWF.json"
+            --out "data/raob/staging/${RAOB_CYCLE}/GFS.json"
 
-      - name: Commit staged ECMWF outputs
+      - name: Commit staged GFS outputs
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add "tiles/ecmwf/${RAOB_CYCLE}" "data/raob/staging/${RAOB_CYCLE}/ECMWF.json" || true
+          git add "tiles/250mb/${RAOB_CYCLE}" "data/raob/staging/${RAOB_CYCLE}/GFS.json" || true
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "Stage ECMWF for RAOB ${RAOB_CYCLE}"
+          git commit -m "Stage GFS for RAOB ${RAOB_CYCLE}"
 
           git fetch origin main
           git pull --rebase origin main
