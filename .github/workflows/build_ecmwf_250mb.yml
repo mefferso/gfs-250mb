@@ -124,6 +124,7 @@ jobs:
           matplotlib.use("Agg")
           import matplotlib.pyplot as plt
           import os
+          import json
 
           WEBMERC_MAXLAT = 85.05112878
 
@@ -152,12 +153,14 @@ jobs:
           dy = float(abs(lats[1] - lats[0]))
           transform = from_origin(float(lons.min()), float(lats.max()), dx, dy)
 
+          # 1. Write Raw GeoTIFF
           with rasterio.open("ecmwf_output_250mb_speed.tif", "w", driver="GTiff",
               height=speed.shape[0], width=speed.shape[1], count=1,
               dtype='float32', crs="EPSG:4326", transform=transform, nodata=np.nan
           ) as dst:
               dst.write(speed.values.astype('float32'), 1)
 
+          # 2. Write Color GeoTIFF
           vmin, vmax = 20.0, 225.0
           data = np.clip(speed.values, vmin, vmax)
           norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
@@ -173,7 +176,29 @@ jobs:
               dst.write(rgba_u8[:, :, 1], 2)
               dst.write(rgba_u8[:, :, 2], 3)
 
-          print("GeoTIFFs written successfully.")
+          # 3. Generate JSON Data Grid (Sidecar) for mouseover
+          print("Generating JSON Grid...")
+          step = 0.5
+          # Interpolate to specific 0.5 grid points
+          grid = speed.interp(
+              latitude=np.arange(90, -90.1, -step), 
+              longitude=np.arange(-180, 180, step),
+              method="nearest"
+          )
+          vals = np.round(grid.values).astype(int)
+          vals = np.where(vals < 0, -1, vals) 
+          vals = np.where(np.isnan(grid.values), -1, vals)
+
+          grid_out = {
+              "lat0": 90.0, "lon0": -180.0,
+              "dlat": -step, "dlon": step,
+              "width": vals.shape[1], "height": vals.shape[0],
+              "data": vals.flatten().tolist()
+          }
+          with open("grid.json", "w") as f:
+              json.dump(grid_out, f, separators=(',', ':'))
+
+          print("GeoTIFFs and Grid written successfully.")
           EOF
 
       - name: Fetch RAOB obs (00/12Z) -> obs_latest.csv
@@ -212,8 +237,13 @@ jobs:
           set -e
           rm -rf "tiles/ecmwf/${RAOB_CYCLE}"
           mkdir -p "tiles/ecmwf/${RAOB_CYCLE}"
+          
+          # Generate Tiles
           gdal2tiles.py --profile=mercator --xyz -r bilinear -z 0-4 \
             ecmwf_output_250mb_color.tif "tiles/ecmwf/${RAOB_CYCLE}"
+          
+          # Copy Sidecar Grid and Timestamp
+          cp grid.json "tiles/ecmwf/${RAOB_CYCLE}/grid.json"
           date > "tiles/ecmwf/${RAOB_CYCLE}/last_update.txt"
 
       - name: Build staged partial JSON for ECMWF
