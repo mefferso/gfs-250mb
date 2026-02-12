@@ -34,7 +34,8 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install numpy xarray cfgrib eccodes rasterio matplotlib requests pandas ecmwf-opendata
+          # ADDED scipy HERE
+          pip install numpy scipy xarray cfgrib eccodes rasterio matplotlib requests pandas ecmwf-opendata
 
       - name: Download latest available ECMWF (High Res)
         run: |
