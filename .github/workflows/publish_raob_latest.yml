@@ -2,10 +2,11 @@ name: Publish RAOB Latest
 
 on:
   schedule:
-    # Run at minute 55 (after GFS/ECMWF builds at 15/30)
     - cron: "55 */6 * * *"
   workflow_dispatch:
 
+# IMPORTANT: this only prevents *this workflow* from overlapping itself.
+# It does NOT stop the GFS/ECMWF workflows from pushing at the same time.
 concurrency:
   group: raob-publish
   cancel-in-progress: false
@@ -19,30 +20,39 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # Rebase FIRST so we build on the latest main
+      - name: Sync with main (rebase)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git pull --rebase --autostash origin main
+
       - name: Publish Latest Cycle
         run: |
-          # This script merges staging partials into latest.json and promotes tiles
           python scripts/publish_raob_latest.py
 
       - name: Update Inventory
         run: |
-          # This script scans history and rebuilds inventory.json for the frontend scrubber
           python scripts/update_inventory.py
 
       - name: Commit and Push
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Add the modified files (history, latest.json, and the promoted latest tiles)
           git add data/raob/latest.json
           git add data/history
           git add tiles
@@ -54,7 +64,19 @@ jobs:
 
           git commit -m "Publish latest RAOB cycle and update inventory"
 
-          # Push with rebase loop to handle contention
-          git fetch origin main
-          git pull --rebase origin main
-          git push origin HEAD:main
+          for attempt in 1 2 3; do
+            git fetch origin main
+            # autostash handles anything that appears between steps (rare but possible)
+            git pull --rebase --autostash origin main || true
+
+            if git push origin HEAD:main; then
+              echo "Push succeeded."
+              exit 0
+            fi
+
+            echo "Push rejected. Retrying..."
+          done
+
+          echo "ERROR: push failed after retries"
+          git status --porcelain || true
+          exit 1
