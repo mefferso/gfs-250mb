@@ -1,72 +1,9 @@
 [
   {
-    "cycle": "2026021700",
-    "label": "2026-02-17 00z",
-    "path": "data/history/2026021700.json",
-    "gfs_tiles": "tiles/250mb/2026021700/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026021700/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026021612",
-    "label": "2026-02-16 12z",
-    "path": "data/history/2026021612.json",
-    "gfs_tiles": "tiles/250mb/2026021612/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026021612/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026021600",
-    "label": "2026-02-16 00z",
-    "path": "data/history/2026021600.json",
-    "gfs_tiles": "tiles/250mb/2026021600/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026021600/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026021512",
-    "label": "2026-02-15 12z",
-    "path": "data/history/2026021512.json",
-    "gfs_tiles": "tiles/250mb/2026021512/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026021512/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026021500",
-    "label": "2026-02-15 00z",
-    "path": "data/history/2026021500.json",
-    "gfs_tiles": "tiles/250mb/2026021500/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026021500/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026021412",
-    "label": "2026-02-14 12z",
-    "path": "data/history/2026021412.json",
-    "gfs_tiles": "tiles/250mb/2026021412/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026021412/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026021400",
-    "label": "2026-02-14 00z",
-    "path": "data/history/2026021400.json",
-    "gfs_tiles": "tiles/250mb/2026021400/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026021400/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026021312",
-    "label": "2026-02-13 12z",
-    "path": "data/history/2026021312.json",
-    "gfs_tiles": "tiles/250mb/2026021312/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026021312/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026021300",
-    "label": "2026-02-13 00z",
-    "path": "data/history/2026021300.json",
-    "gfs_tiles": "tiles/250mb/2026021300/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026021300/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026021212",
-    "label": "2026-02-12 12z",
-    "path": "data/history/2026021212.json",
-    "gfs_tiles": "tiles/250mb/2026021212/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026021212/{z}/{x}/{y}.png"
+    "cycle": "2026030512",
+    "label": "2026-03-05 12z",
+    "path": "data/history/2026030512.json",
+    "gfs_tiles": "tiles/250mb/2026030512/{z}/{x}/{y}.png",
+    "ecmwf_tiles": "tiles/ecmwf/2026030512/{z}/{x}/{y}.png"
   }
 ]
