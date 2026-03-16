@@ -61,12 +61,5 @@
     "path": "data/history/2026031112.json",
     "gfs_tiles": "tiles/250mb/2026031112/{z}/{x}/{y}.png",
     "ecmwf_tiles": "tiles/ecmwf/2026031112/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026031100",
-    "label": "2026-03-11 00z",
-    "path": "data/history/2026031100.json",
-    "gfs_tiles": "tiles/250mb/2026031100/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026031100/{z}/{x}/{y}.png"
   }
 ]
