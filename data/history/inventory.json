@@ -1,5 +1,12 @@
 [
   {
+    "cycle": "2026040400",
+    "label": "2026-04-04 00z",
+    "path": "data/history/2026040400.json",
+    "gfs_tiles": "tiles/250mb/2026040400/{z}/{x}/{y}.png",
+    "ecmwf_tiles": "tiles/ecmwf/2026040400/{z}/{x}/{y}.png"
+  },
+  {
     "cycle": "2026040312",
     "label": "2026-04-03 12z",
     "path": "data/history/2026040312.json",
@@ -61,12 +68,5 @@
     "path": "data/history/2026033012.json",
     "gfs_tiles": "tiles/250mb/2026033012/{z}/{x}/{y}.png",
     "ecmwf_tiles": "tiles/ecmwf/2026033012/{z}/{x}/{y}.png"
-  },
-  {
-    "cycle": "2026033000",
-    "label": "2026-03-30 00z",
-    "path": "data/history/2026033000.json",
-    "gfs_tiles": "tiles/250mb/2026033000/{z}/{x}/{y}.png",
-    "ecmwf_tiles": "tiles/ecmwf/2026033000/{z}/{x}/{y}.png"
   }
 ]
